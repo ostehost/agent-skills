@@ -53,6 +53,36 @@ scripts/install-skills --mode copy --target ~/.agents/skills
 Symlinks are best for local development because changes in this checkout are
 immediately visible. Copies are better for portable or locked-down setups.
 
+## Codex And Claude
+
+For Codex, symlink this repo into `~/.codex/skills`:
+
+```sh
+mkdir -p ~/.codex/skills
+ln -sfn "$(pwd)/skills" ~/.codex/skills/agent-skills
+```
+
+For Claude Code, symlink this repo into `~/.claude/skills`:
+
+```sh
+mkdir -p ~/.claude
+ln -sfn "$(pwd)/skills" ~/.claude/skills
+```
+
+If `~/.claude/skills` already points at another shared skills folder, add
+symlinks inside that folder instead:
+
+```sh
+ln -sfn "$(pwd)/skills/autoreview" /path/to/shared-skills/autoreview
+ln -sfn "$(pwd)/skills/crabbox" /path/to/shared-skills/crabbox
+```
+
+Recommended one-liner for repo `AGENTS.md` files:
+
+```text
+Shared agent workflows: install or symlink https://github.com/openclaw/agent-skills for `autoreview`, `crabbox`, and other common skills; do not vendor shared skills here unless this repo intentionally needs a zero-setup snapshot.
+```
+
 ## Zero-Setup Repos
 
 Some important repos should work for contributors who only cloned that repo and
