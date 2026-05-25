@@ -444,7 +444,7 @@ mark { background: var(--mark); color: var(--ink); padding: 0 1px; }
   const filters = ["message", "tool_call", "tool_result", "reasoning", "memory", "system", "event"];
   const themeStorageKey = "session-viewer-theme";
   const viewModeStorageKey = "session-viewer-view-mode";
-  const defaultFilters = filters.filter((filter) => filter !== "system");
+  const defaultFilters = filters.filter((filter) => filter !== "system" && filter !== "event");
   const state = { doc: null, enabled: new Set(defaultFilters), homePath: "", query: "", showRaw: false, theme: localStorage.getItem(themeStorageKey) || "system", viewMode: localStorage.getItem(viewModeStorageKey) || "reader" };
   const $ = (id) => document.getElementById(id);
   const escapeHtml = (value) => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
