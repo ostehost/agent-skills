@@ -9,6 +9,17 @@ Use when asked to view, export, inspect, or share a Codex, Claude Code, OpenClaw
 
 ## Commands
 
+When the session path is not known and the `agent-transcript` skill is available, use it first to find the likely JSONL session:
+
+```bash
+.agents/skills/agent-transcript/scripts/agent-transcript find \
+  --query "$USER_GOAL_OR_TITLE $BRANCH_OR_URL" \
+  --cwd "$PWD" \
+  --since-days 14
+```
+
+Pick the highest-confidence `file` result, then render it with `session-viewer`.
+
 From a repo that has this skill:
 
 ```bash
@@ -49,6 +60,7 @@ OpenClaw/Pi:
 AGENT_ID="<agentId>"
 SESSION_DIR="${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/agents/$AGENT_ID/sessions"
 ls -t "$SESSION_DIR"/*.jsonl | head
+find "${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/agents" -path '*/sessions/*.jsonl' -type f | sort
 ```
 
 Use `sessions.json` in the same directory to map session keys to session ids.
