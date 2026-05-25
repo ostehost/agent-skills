@@ -12,6 +12,8 @@ repo.
 - `autoreview`: structured closeout/code-review workflow plus helper script.
 - `crabbox`: Crabbox/Testbox remote validation workflow for broad or CI-parity
   proof.
+- `handoff`: path-free prompt handoff workflow for delegating a task to another
+  agent.
 
 Repo-specific product skills should stay in the repo they describe. For example,
 an `acpx` usage skill belongs in `openclaw/acpx`; a general review helper belongs
@@ -109,6 +111,8 @@ skills/
     SKILL.md
     scripts/
   crabbox/
+    SKILL.md
+  handoff/
     SKILL.md
 scripts/
   install-skills
