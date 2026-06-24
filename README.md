@@ -157,14 +157,17 @@ Run this after edits:
 ```sh
 scripts/validate-skills
 ruby -c scripts/install-skills && ruby -c scripts/validate-skills
+ruby scripts/install-skills.test.rb && ruby scripts/validate-skills.test.rb
 bash -n skills/autoreview/scripts/test-review-harness
 python3 -m py_compile skills/autoreview/scripts/autoreview skills/autoreview/scripts/test-review-harness.py
 node --check skills/agent-transcript/scripts/agent-transcript
 node --test skills/agent-transcript/scripts/agent-transcript.test.mjs skills/session-viewer/scripts/session-viewer.test.ts
 ```
 
-The validator checks every `skills/*/SKILL.md` for YAML frontmatter plus required
-`name` and `description`.
+The validator checks every `skills/*/SKILL.md` for YAML frontmatter with required
+`name` and `description`, that `name` matches the skill directory, and that
+`skills.sh.json` is valid JSON referencing only skills that exist (each in at most
+one grouping).
 
 Session exports can contain sensitive conversation data. Treat `session-viewer`
 HTML as local/private output unless it has been separately redacted and reviewed.

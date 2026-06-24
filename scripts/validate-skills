@@ -1,7 +1,105 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+require "json"
+require "set"
 require "yaml"
+
+# Validate the repo's skill invariants:
+#   1. every skills/*/SKILL.md has well-formed YAML frontmatter (a mapping) with a
+#      non-empty name + description, and name matches the skill directory
+#   2. skills.sh.json is valid JSON of the expected shape and only references
+#      skills that exist on disk, with no skill listed more than once
+#
+# Ungrouped skills are allowed (skills.sh.json sets "notGrouped": "bottom"), so a
+# skill need not appear in the manifest; it just may not dangle or duplicate.
+#
+# Malformed input is the validator's whole reason to exist, so every bad shape
+# must produce a readable error line, never a raw backtrace or a silent pass.
+
+def parse_frontmatter(text)
+  return [nil, "missing YAML frontmatter"] unless text.start_with?("---\n")
+
+  close = frontmatter_end(text)
+  return [nil, "unterminated YAML frontmatter"] unless close
+
+  data = YAML.safe_load(text[4...close], permitted_classes: [], aliases: false)
+  return [{}, nil] if data.nil?
+  return [nil, "frontmatter is not a mapping"] unless data.is_a?(Hash)
+
+  [data, nil]
+rescue Psych::Exception => e
+  [nil, "invalid YAML: #{e.message}"]
+end
+
+# Offset of the closing "---" delimiter, requiring it to occupy its own line so a
+# frontmatter value that merely starts with "---" does not truncate parsing early.
+def frontmatter_end(text)
+  offset = 4
+  while (idx = text.index("\n---", offset))
+    after = text[idx + 4]
+    return idx if after.nil? || after == "\n"
+
+    offset = idx + 4
+  end
+  nil
+end
+
+def validate_skill(path, root)
+  rel = path.delete_prefix("#{root}/")
+  dir = File.basename(File.dirname(path))
+  data, err = parse_frontmatter(File.read(path))
+  return ["#{rel}: #{err}"] if err
+
+  name = data["name"]
+  description = data["description"]
+  named = name.is_a?(String) && !name.strip.empty?
+  errors = []
+  errors << "#{rel}: missing name" unless named
+  errors << "#{rel}: missing description" unless description.is_a?(String) && !description.strip.empty?
+  errors << "#{rel}: name #{name.inspect} does not match directory #{dir.inspect}" if named && name != dir
+  errors
+end
+
+def validate_manifest(path, available)
+  return [] unless File.exist?(path)
+
+  rel = File.basename(path)
+  data = JSON.parse(File.read(path))
+  return ["#{rel}: top-level value must be a JSON object"] unless data.is_a?(Hash)
+
+  groupings = data["groupings"]
+  return ["#{rel}: missing \"groupings\" array"] if groupings.nil?
+  return ["#{rel}: \"groupings\" must be an array"] unless groupings.is_a?(Array)
+
+  validate_groupings(rel, groupings, available)
+rescue JSON::ParserError => e
+  ["#{rel}: invalid JSON: #{e.message}"]
+end
+
+def validate_groupings(rel, groupings, available)
+  seen = Set.new
+  groupings.each_with_index.flat_map do |group, i|
+    unless group.is_a?(Hash)
+      next ["#{rel}: grouping ##{i + 1} must be an object"]
+    end
+
+    title = group["title"].is_a?(String) ? group["title"] : "##{i + 1}"
+    skills = group["skills"] || []
+    next ["#{rel}: grouping #{title.inspect} \"skills\" must be an array"] unless skills.is_a?(Array)
+
+    skills.flat_map { |name| check_manifest_skill(rel, title, name, available, seen) }
+  end
+end
+
+def check_manifest_skill(rel, title, name, available, seen)
+  return ["#{rel}: grouping #{title.inspect} has a non-string skill entry #{name.inspect}"] unless name.is_a?(String)
+
+  errors = []
+  errors << "#{rel}: grouping #{title.inspect} references unknown skill #{name.inspect}" unless available.include?(name)
+  errors << "#{rel}: skill #{name.inspect} is listed more than once" unless seen.add?(name)
+  errors
+end
 
 root = File.expand_path("..", __dir__)
 skill_files = Dir.glob(File.join(root, "skills", "*", "SKILL.md")).sort
@@ -11,35 +109,12 @@ if skill_files.empty?
   exit 1
 end
 
-errors = []
+available = skill_files.map { |path| File.basename(File.dirname(path)) }.to_set
+manifest = File.join(root, "skills.sh.json")
+manifest_present = File.exist?(manifest)
 
-skill_files.each do |path|
-  rel = path.delete_prefix("#{root}/")
-  text = File.read(path)
-  unless text.start_with?("---\n")
-    errors << "#{rel}: missing YAML frontmatter"
-    next
-  end
-
-  close = text.index("\n---", 4)
-  unless close
-    errors << "#{rel}: unterminated YAML frontmatter"
-    next
-  end
-
-  yaml_text = text[4...close]
-  begin
-    data = YAML.safe_load(yaml_text, permitted_classes: [], aliases: false) || {}
-  rescue Psych::Exception => e
-    errors << "#{rel}: invalid YAML: #{e.message}"
-    next
-  end
-
-  name = data["name"]
-  description = data["description"]
-  errors << "#{rel}: missing name" unless name.is_a?(String) && !name.strip.empty?
-  errors << "#{rel}: missing description" unless description.is_a?(String) && !description.strip.empty?
-end
+errors = skill_files.flat_map { |path| validate_skill(path, root) }
+errors.concat(validate_manifest(manifest, available))
 
 if errors.any?
   warn errors.join("\n")
@@ -47,3 +122,4 @@ if errors.any?
 end
 
 puts "validated #{skill_files.length} skills"
+puts "validated skills.sh.json against #{available.length} skills" if manifest_present
