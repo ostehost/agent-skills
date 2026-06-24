@@ -1,5 +1,7 @@
 import {
-  expandMemoryCitationEvents,
+  assignScalarMeta,
+  basename,
+  compactText,
   hasImageExtension,
   imageAttachmentsFromContent,
   isImageSource,
@@ -188,10 +190,7 @@ function eventsFromMessage(record: JsonlRecord, entry: Record<string, unknown>):
     }
   }
 
-  const text = textParts
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .join("\n\n");
+  const text = compactText(textParts);
   if (text) {
     events.unshift({
       id: baseId,
@@ -242,15 +241,7 @@ export const piOpenClawImporter: SessionImporter = {
       }
       const type = stringValue(record.value.type);
       if (type === "session") {
-        for (const [key, value] of Object.entries(record.value)) {
-          if (
-            typeof value === "string" ||
-            typeof value === "number" ||
-            typeof value === "boolean"
-          ) {
-            meta[key] = value;
-          }
-        }
+        assignScalarMeta(meta, record.value);
         continue;
       }
       if (type === "message") {
@@ -274,16 +265,13 @@ export const piOpenClawImporter: SessionImporter = {
       warnings.push("no Pi/OpenClaw message events found");
     }
 
-    const title =
-      stringValue(meta.id) ??
-      (sourcePath ? sourcePath.split(/[\\/]/u).pop() : undefined) ??
-      "OpenClaw session";
+    const title = stringValue(meta.id) ?? basename(sourcePath) ?? "OpenClaw session";
     return {
       format: "pi-openclaw",
       title,
       sourcePath,
       meta,
-      events: expandMemoryCitationEvents(events),
+      events,
       warnings,
     };
   },

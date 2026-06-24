@@ -1,4 +1,4 @@
-import type { JsonlRecord, SessionEvent, SessionImage } from "./types.ts";
+import type { JsonlRecord, SessionDocument, SessionEvent, SessionImage } from "./types.ts";
 
 export function parseJsonl(text: string): { records: JsonlRecord[]; warnings: string[] } {
   const records: JsonlRecord[] = [];
@@ -54,6 +54,20 @@ export function compactText(parts: Array<string | undefined>): string {
     .map((part) => part?.trim())
     .filter((part): part is string => Boolean(part))
     .join("\n\n");
+}
+
+export function basename(sourcePath: string | undefined): string | undefined {
+  return sourcePath ? (sourcePath.split(/[\\/]/u).pop() ?? undefined) : undefined;
+}
+
+// Copy every scalar (string/number/boolean) entry of a session-metadata record
+// into the document meta map, the same way every importer surfaces session info.
+export function assignScalarMeta(meta: SessionDocument["meta"], source: Record<string, unknown>): void {
+  for (const [key, value] of Object.entries(source)) {
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      meta[key] = value;
+    }
+  }
 }
 
 export function isImageSource(value: string): boolean {

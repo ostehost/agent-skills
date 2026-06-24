@@ -1,6 +1,6 @@
 import {
+  basename,
   compactText,
-  expandMemoryCitationEvents,
   firstText,
   imageAttachmentsFromContent,
   isRecord,
@@ -202,16 +202,13 @@ export const claudeImporter: SessionImporter = {
       warnings.push("no Claude message events found");
     }
 
-    const title =
-      stringValue(meta.summary) ??
-      (sourcePath ? sourcePath.split(/[\\/]/u).pop() : undefined) ??
-      "Claude session";
+    const title = stringValue(meta.summary) ?? basename(sourcePath) ?? "Claude session";
     return {
       format: "claude",
       title,
       sourcePath,
       meta,
-      events: expandMemoryCitationEvents(events),
+      events,
       warnings,
     };
   },

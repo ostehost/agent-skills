@@ -1,6 +1,7 @@
 import {
+  assignScalarMeta,
+  basename,
   compactText,
-  expandMemoryCitationEvents,
   firstText,
   imageAttachmentsFromContent,
   isRecord,
@@ -210,15 +211,7 @@ export const codexImporter: SessionImporter = {
       if (recordType === "session_meta") {
         const payload = payloadOf(record);
         if (payload) {
-          for (const [key, value] of Object.entries(payload)) {
-            if (
-              typeof value === "string" ||
-              typeof value === "number" ||
-              typeof value === "boolean"
-            ) {
-              meta[key] = value;
-            }
-          }
+          assignScalarMeta(meta, payload);
         }
         continue;
       }
@@ -281,16 +274,13 @@ export const codexImporter: SessionImporter = {
       }
     }
 
-    const title =
-      stringValue(meta.id) ??
-      (sourcePath ? sourcePath.split(/[\\/]/u).pop() : undefined) ??
-      "Codex session";
+    const title = stringValue(meta.id) ?? basename(sourcePath) ?? "Codex session";
     return {
       format: "codex",
       title,
       sourcePath,
       meta,
-      events: expandMemoryCitationEvents(events),
+      events,
       warnings,
     };
   },
