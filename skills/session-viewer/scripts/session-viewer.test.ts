@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { parseSessionDocument } from "./core/detect.ts";
-import { parseJsonl } from "./core/jsonl.ts";
+import { basename, parseJsonl } from "./core/jsonl.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -14,6 +14,14 @@ function parse(text: string) {
   const { records } = parseJsonl(text);
   return parseSessionDocument(records, "fixture.jsonl");
 }
+
+test("basename returns the last non-empty path segment", () => {
+  assert.equal(basename("dir/session.jsonl"), "session.jsonl");
+  assert.equal(basename("C:\\logs\\session.jsonl"), "session.jsonl");
+  assert.equal(basename("dir/"), "dir");
+  assert.equal(basename("/"), undefined);
+  assert.equal(basename(undefined), undefined);
+});
 
 test("parses Codex rollout tool calls and outputs", () => {
   const doc = parse(

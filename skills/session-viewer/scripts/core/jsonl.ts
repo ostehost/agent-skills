@@ -56,8 +56,10 @@ export function compactText(parts: Array<string | undefined>): string {
     .join("\n\n");
 }
 
+// Last non-empty path segment, so a trailing separator ("dir/", "/") falls
+// through to the caller's literal title fallback instead of an empty title.
 export function basename(sourcePath: string | undefined): string | undefined {
-  return sourcePath ? (sourcePath.split(/[\\/]/u).pop() ?? undefined) : undefined;
+  return sourcePath ? sourcePath.split(/[\\/]/u).filter(Boolean).pop() : undefined;
 }
 
 // Copy every scalar (string/number/boolean) entry of a session-metadata record
