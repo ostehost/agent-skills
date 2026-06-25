@@ -5,6 +5,9 @@ require "json"
 require "set"
 require "yaml"
 
+Encoding.default_external = Encoding::UTF_8
+Encoding.default_internal = Encoding::UTF_8
+
 # Validate the repo's skill invariants:
 #   1. every skills/*/SKILL.md has well-formed YAML frontmatter (a mapping) with a
 #      non-empty name + description, and name matches the skill directory
