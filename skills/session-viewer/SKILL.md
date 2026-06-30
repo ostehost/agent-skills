@@ -65,11 +65,11 @@ find "${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/agents" -path '*/sessions/*.jsonl' 
 
 Use `sessions.json` in the same directory to map session keys to session ids.
 
-Claude Code:
+Claude Code (honor `CLAUDE_CONFIG_DIR`; on XDG setups sessions live under `~/.config/claude/projects`, not `~/.claude/projects`):
 
 ```bash
-find "$HOME/.claude/projects" -name '*.jsonl' -type f | sort
-ls -t "$HOME/.claude/projects"/**/*.jsonl | head
+find "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects" -name '*.jsonl' -type f | sort
+ls -t "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"/**/*.jsonl | head
 ```
 
 Some Claude installs also keep exported JSON/JSONL under project-specific cache folders; prefer the newest JSONL with the target repo path in its parent folder.
