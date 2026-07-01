@@ -1,14 +1,18 @@
 import {
   assignScalarMeta,
-  basename,
   compactText,
+  firstText,
   hasImageExtension,
   imageAttachmentsFromContent,
   isImageSource,
   isRecord,
   pretty,
+  reasoningEvent,
+  resolveTitle,
   stringValue,
   textFromContentBlocks,
+  toolCallEvent,
+  toolResultEvent,
 } from "../core/jsonl.ts";
 import type {
   JsonlRecord,
@@ -22,14 +26,12 @@ function timestampOf(
   entry: Record<string, unknown>,
   message?: Record<string, unknown>,
 ): string | undefined {
-  const raw =
-    stringValue(entry.timestamp) ??
-    stringValue(entry.createdAt) ??
-    stringValue(entry.updatedAt) ??
+  return (
+    firstText(entry, ["timestamp", "createdAt", "updatedAt"]) ??
     (typeof message?.timestamp === "number"
       ? new Date(message.timestamp).toISOString()
-      : undefined);
-  return raw;
+      : undefined)
+  );
 }
 
 function arrayOrSingle(value: unknown): unknown[] {
@@ -120,20 +122,19 @@ function eventsFromMessage(record: JsonlRecord, entry: Record<string, unknown>):
     ];
     const text = textFromContentBlocks(message.content) || (images.length ? "" : pretty(message));
     return [
-      {
+      toolResultEvent({
         id: baseId,
-        kind: "tool_result",
         title: stringValue(message.toolCallId)
           ? `tool result: ${stringValue(message.toolCallId)}`
           : "tool result",
         text,
-        images: images.length ? images : undefined,
+        images,
         timestamp,
         callId: stringValue(message.toolCallId),
         toolName: stringValue(message.toolName),
         status: message.isError === true ? "error" : "ok",
         raw: entry,
-      },
+      }),
     ];
   }
 
@@ -162,29 +163,31 @@ function eventsFromMessage(record: JsonlRecord, entry: Record<string, unknown>):
         if (!text) {
           continue;
         }
-        events.push({
-          id: `${baseId}-thinking-${blockIndex++}`,
-          kind: "reasoning",
-          title: "thinking",
-          text,
-          timestamp,
-          raw: block,
-        });
+        events.push(
+          reasoningEvent({
+            id: `${baseId}-thinking-${blockIndex++}`,
+            title: "thinking",
+            text,
+            timestamp,
+            raw: block,
+          }),
+        );
         continue;
       }
       if (type === "toolCall") {
         const name = stringValue(block.name) ?? "toolCall";
-        events.push({
-          id: `${baseId}-tool-${blockIndex++}`,
-          kind: "tool_call",
-          title: `tool call: ${name}`,
-          text: pretty(block.arguments ?? block.input),
-          timestamp,
-          callId: stringValue(block.id),
-          toolName: name,
-          status: "running",
-          raw: block,
-        });
+        events.push(
+          toolCallEvent({
+            id: `${baseId}-tool-${blockIndex++}`,
+            title: `tool call: ${name}`,
+            argsText: pretty(block.arguments ?? block.input),
+            timestamp,
+            callId: stringValue(block.id),
+            toolName: name,
+            status: "running",
+            raw: block,
+          }),
+        );
         continue;
       }
     }
@@ -265,7 +268,7 @@ export const piOpenClawImporter: SessionImporter = {
       warnings.push("no Pi/OpenClaw message events found");
     }
 
-    const title = stringValue(meta.id) ?? basename(sourcePath) ?? "OpenClaw session";
+    const title = resolveTitle(stringValue(meta.id), sourcePath, "OpenClaw session");
     return {
       format: "pi-openclaw",
       title,

@@ -184,6 +184,19 @@ test("keeps Codex turn-aborted-shaped messages without event rows", () => {
   assert.equal(doc.events[0]?.text, marker);
 });
 
+test("warns when a Codex session produces zero events", () => {
+  const doc = parse(
+    JSON.stringify({
+      timestamp: "2026-05-25T10:00:00Z",
+      type: "session_meta",
+      payload: { id: "codex-session" },
+    }),
+  );
+  assert.equal(doc.format, "codex");
+  assert.equal(doc.events.length, 0);
+  assert.ok(doc.warnings.includes("no Codex message events found"));
+});
+
 test("collapses memory citations into memory notes", () => {
   const citation = [
     "<oai-mem-citation>",

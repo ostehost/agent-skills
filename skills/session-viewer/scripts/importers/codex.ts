@@ -1,13 +1,16 @@
 import {
   assignScalarMeta,
-  basename,
   compactText,
   firstText,
   imageAttachmentsFromContent,
   isRecord,
   pretty,
+  reasoningEvent,
+  resolveTitle,
   stringValue,
   textFromContentBlocks,
+  toolCallEvent,
+  toolResultEvent,
 } from "../core/jsonl.ts";
 import type { JsonlRecord, SessionDocument, SessionEvent, SessionImporter } from "../core/types.ts";
 
@@ -92,90 +95,78 @@ function eventFromResponseItem(
     if (!text) {
       return null;
     }
-    return {
-      id,
-      kind: "reasoning",
-      title: "reasoning",
-      text,
-      timestamp: timestampOf(record),
-      raw: payload,
-    };
+    return reasoningEvent({ id, title: "reasoning", text, timestamp: timestampOf(record), raw: payload });
   }
 
   if (type === "function_call") {
     const name = stringValue(payload.name) ?? "function_call";
     const callId = stringValue(payload.call_id);
-    return {
+    return toolCallEvent({
       id,
-      kind: "tool_call",
       title: `tool call: ${name}`,
-      text: pretty(payload.arguments),
+      argsText: pretty(payload.arguments),
       timestamp: timestampOf(record),
       callId,
       toolName: name,
       status: "running",
       raw: payload,
-    };
+    });
   }
 
   if (type === "function_call_output") {
     const callId = stringValue(payload.call_id);
     const output = pretty(payload.output);
-    return {
+    return toolResultEvent({
       id,
-      kind: "tool_result",
       title: callId ? `tool result: ${callId}` : "tool result",
       text: output,
       timestamp: timestampOf(record),
       callId,
       status: statusFromOutput(output),
       raw: payload,
-    };
+    });
   }
 
   if (type === "custom_tool_call") {
     const name = stringValue(payload.name) ?? "custom_tool_call";
     const callId = stringValue(payload.call_id);
     const status = stringValue(payload.status);
-    return {
+    return toolCallEvent({
       id,
-      kind: "tool_call",
       title: `custom tool call: ${name}${status ? ` [${status}]` : ""}`,
-      text: pretty(payload.input),
+      argsText: pretty(payload.input),
       timestamp: timestampOf(record),
       callId,
       toolName: name,
       status: status === "failed" ? "error" : status === "completed" ? "ok" : "running",
       raw: payload,
-    };
+    });
   }
 
   if (type === "custom_tool_call_output") {
     const callId = stringValue(payload.call_id);
     const output = pretty(payload.output);
-    return {
+    return toolResultEvent({
       id,
-      kind: "tool_result",
       title: callId ? `custom tool result: ${callId}` : "custom tool result",
       text: output,
       timestamp: timestampOf(record),
       callId,
       status: output.toLowerCase().includes("error") ? "error" : "unknown",
       raw: payload,
-    };
+    });
   }
 
   if (type === "web_search_call") {
-    return {
+    return toolCallEvent({
       id,
-      kind: "tool_call",
       title: "web search",
-      text: pretty(payload),
+      argsText: pretty(payload),
       timestamp: timestampOf(record),
       toolName: "web_search",
       status: "unknown",
       raw: payload,
-    };
+    });
   }
 
   return {
@@ -274,7 +265,11 @@ export const codexImporter: SessionImporter = {
       }
     }
 
-    const title = stringValue(meta.id) ?? basename(sourcePath) ?? "Codex session";
+    if (events.length === 0) {
+      warnings.push("no Codex message events found");
+    }
+
+    const title = resolveTitle(stringValue(meta.id), sourcePath, "Codex session");
     return {
       format: "codex",
       title,

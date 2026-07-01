@@ -1,19 +1,20 @@
 import {
-  basename,
   compactText,
   firstText,
   imageAttachmentsFromContent,
   isRecord,
   pretty,
+  reasoningEvent,
+  resolveTitle,
   stringValue,
   textFromContentBlocks,
+  toolCallEvent,
+  toolResultEvent,
 } from "../core/jsonl.ts";
 import type { JsonlRecord, SessionDocument, SessionEvent, SessionImporter } from "../core/types.ts";
 
 function timestampOf(value: Record<string, unknown>): string | undefined {
-  return (
-    stringValue(value.timestamp) ?? stringValue(value.created_at) ?? stringValue(value.updated_at)
-  );
+  return firstText(value, ["timestamp", "created_at", "updated_at"]);
 }
 
 function parseContentBlocks(
@@ -62,29 +63,31 @@ function parseContentBlocks(
       if (!text) {
         continue;
       }
-      events.push({
-        id: `${recordId}-thinking-${textIndex++}`,
-        kind: "reasoning",
-        title: "thinking",
-        text,
-        timestamp,
-        raw: block,
-      });
+      events.push(
+        reasoningEvent({
+          id: `${recordId}-thinking-${textIndex++}`,
+          title: "thinking",
+          text,
+          timestamp,
+          raw: block,
+        }),
+      );
       continue;
     }
     if (type === "tool_use") {
       const name = stringValue(block.name) ?? "tool_use";
-      events.push({
-        id: `${recordId}-tool-${textIndex++}`,
-        kind: "tool_call",
-        title: `tool call: ${name}`,
-        text: pretty(block.input),
-        timestamp,
-        callId: stringValue(block.id),
-        toolName: name,
-        status: "running",
-        raw: block,
-      });
+      events.push(
+        toolCallEvent({
+          id: `${recordId}-tool-${textIndex++}`,
+          title: `tool call: ${name}`,
+          argsText: pretty(block.input),
+          timestamp,
+          callId: stringValue(block.id),
+          toolName: name,
+          status: "running",
+          raw: block,
+        }),
+      );
       continue;
     }
     if (type === "tool_result") {
@@ -92,19 +95,20 @@ function parseContentBlocks(
       const text =
         textFromContentBlocks(block.content) ||
         (images.length ? "" : pretty(block.content ?? block));
-      events.push({
-        id: `${recordId}-result-${textIndex++}`,
-        kind: "tool_result",
-        title: stringValue(block.tool_use_id)
-          ? `tool result: ${stringValue(block.tool_use_id)}`
-          : "tool result",
-        text,
-        images: images.length ? images : undefined,
-        timestamp,
-        callId: stringValue(block.tool_use_id),
-        status: block.is_error === true ? "error" : "ok",
-        raw: block,
-      });
+      events.push(
+        toolResultEvent({
+          id: `${recordId}-result-${textIndex++}`,
+          title: stringValue(block.tool_use_id)
+            ? `tool result: ${stringValue(block.tool_use_id)}`
+            : "tool result",
+          text,
+          images,
+          timestamp,
+          callId: stringValue(block.tool_use_id),
+          status: block.is_error === true ? "error" : "ok",
+          raw: block,
+        }),
+      );
       continue;
     }
     const text = textFromContentBlocks([block]);
@@ -202,7 +206,7 @@ export const claudeImporter: SessionImporter = {
       warnings.push("no Claude message events found");
     }
 
-    const title = stringValue(meta.summary) ?? basename(sourcePath) ?? "Claude session";
+    const title = resolveTitle(stringValue(meta.summary), sourcePath, "Claude session");
     return {
       format: "claude",
       title,

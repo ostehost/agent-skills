@@ -27,10 +27,6 @@ export function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 
-export function numberValue(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
 export function pretty(value: unknown): string {
   if (typeof value === "string") {
     const trimmed = value.trim();
@@ -60,6 +56,85 @@ export function compactText(parts: Array<string | undefined>): string {
 // through to the caller's literal title fallback instead of an empty title.
 export function basename(sourcePath: string | undefined): string | undefined {
   return sourcePath ? sourcePath.split(/[\\/]/u).filter(Boolean).pop() : undefined;
+}
+
+// Every importer picks a document title the same way: prefer some format-specific
+// preferred value, else the source file's basename, else a literal fallback.
+export function resolveTitle(
+  preferred: string | undefined,
+  sourcePath: string | undefined,
+  fallback: string,
+): string {
+  return preferred ?? basename(sourcePath) ?? fallback;
+}
+
+// Shared shapes for the tool_call/tool_result/reasoning events every importer
+// builds; each format's per-block field names (block.input vs block.arguments,
+// block.id vs call_id, ...) stay in the importer, but the SessionEvent shape and
+// the images/undefined normalization are centralized here.
+export function toolCallEvent(options: {
+  id: string;
+  title: string;
+  argsText: string;
+  timestamp?: string;
+  callId?: string;
+  toolName?: string;
+  status: SessionEvent["status"];
+  raw?: unknown;
+}): SessionEvent {
+  return {
+    id: options.id,
+    kind: "tool_call",
+    title: options.title,
+    text: options.argsText,
+    timestamp: options.timestamp,
+    callId: options.callId,
+    toolName: options.toolName,
+    status: options.status,
+    raw: options.raw,
+  };
+}
+
+export function toolResultEvent(options: {
+  id: string;
+  title: string;
+  text: string;
+  images?: SessionImage[];
+  timestamp?: string;
+  callId?: string;
+  toolName?: string;
+  status: SessionEvent["status"];
+  raw?: unknown;
+}): SessionEvent {
+  return {
+    id: options.id,
+    kind: "tool_result",
+    title: options.title,
+    text: options.text,
+    images: options.images?.length ? options.images : undefined,
+    timestamp: options.timestamp,
+    callId: options.callId,
+    toolName: options.toolName,
+    status: options.status,
+    raw: options.raw,
+  };
+}
+
+export function reasoningEvent(options: {
+  id: string;
+  title: string;
+  text: string;
+  timestamp?: string;
+  raw?: unknown;
+}): SessionEvent {
+  return {
+    id: options.id,
+    kind: "reasoning",
+    title: options.title,
+    text: options.text,
+    timestamp: options.timestamp,
+    raw: options.raw,
+  };
 }
 
 // Copy every scalar (string/number/boolean) entry of a session-metadata record
