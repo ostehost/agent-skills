@@ -47,7 +47,23 @@ export function buildSessionViewerHtml(
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${htmlEscape(document?.title ?? "Session Viewer")}</title>
-<script>
+${buildBootstrapThemeScript()}
+${buildStyles()}
+</head>
+<body>
+${buildMarkup()}
+<script id="viewer-payload" type="application/json">${scriptJsonEscape(payload)}</script>
+${buildClientScript()}
+</body>
+</html>`;
+}
+
+// The bulk of this file is one large, mostly-static template: CSS, HTML markup,
+// and a browser-side client script, split into named builders below purely for
+// reviewability -- none of these functions take document/options; only the two
+// real interpolation points (title, embedded payload) live in the function above.
+function buildBootstrapThemeScript(): string {
+  return `<script>
 (() => {
   try {
     const stored = localStorage.getItem("session-viewer-theme") || "system";
@@ -56,8 +72,11 @@ export function buildSessionViewerHtml(
     document.documentElement.style.colorScheme = dark ? "dark" : "light";
   } catch {}
 })();
-</script>
-<style>
+</script>`;
+}
+
+function buildStyles(): string {
+  return `<style>
 :root {
   --bg: #f4f4f4;
   --panel: #ffffff;
@@ -500,10 +519,11 @@ mark { background: var(--mark); color: var(--ink); padding: 0 1px; }
   .header { display: block; }
   .actions { justify-content: start; margin-top: 12px; }
 }
-</style>
-</head>
-<body>
-<div id="app">
+</style>`;
+}
+
+function buildMarkup(): string {
+  return `<div id="app">
   <aside>
     <div class="brand"><h1>Session Viewer</h1><span id="format-label"></span></div>
     <div class="loader">
@@ -544,9 +564,11 @@ mark { background: var(--mark); color: var(--ink); padding: 0 1px; }
     </div>
     <div class="event-list" id="events"></div>
   </main>
-</div>
-<script id="viewer-payload" type="application/json">${scriptJsonEscape(payload)}</script>
-<script>
+</div>`;
+}
+
+function buildClientScript(): string {
+  return `<script>
 (() => {
   const filters = ["message", "tool_call", "tool_result", "reasoning", "memory", "system", "event"];
   const themeStorageKey = "session-viewer-theme";
@@ -678,6 +700,11 @@ mark { background: var(--mark); color: var(--ink); padding: 0 1px; }
       return cleanImageMarkerText(block.text ?? block.content ?? block.output ?? "", hasImages);
     }));
   };
+  const statusFromOutput = (output) => {
+    const match = /Process exited with code\\s+(-?\\d+)/u.exec(String(output ?? ""));
+    if (!match) return "unknown";
+    return match[1] === "0" ? "ok" : "error";
+  };
   const isTurnAbortedText = (text) => {
     const trimmed = String(text ?? "").trim();
     return /^<turn_aborted>[\\s\\S]*<\\/turn_aborted>$/u.test(trimmed)
@@ -751,12 +778,16 @@ mark { background: var(--mark); color: var(--ink); padding: 0 1px; }
           const text = textBlocks(p.content);
           if (text || images.length) events.push({ id: "e" + record.line, kind: p.role === "developer" ? "system" : "message", role: p.role, title: String(p.role ?? "message"), text, images: images.length ? images : undefined, timestamp: ts(record), raw: p });
         } else if (type === "reasoning") {
-          const text = compact([Array.isArray(p.summary) ? compact(p.summary.map((s) => s?.text)) : "", textBlocks(p.content)]);
+          const text = compact([Array.isArray(p.summary) ? compact(p.summary.map((s) => s?.text ?? s?.summary)) : "", textBlocks(p.content)]);
           if (text) events.push({ id: "e" + record.line, kind: "reasoning", title: "reasoning", text, timestamp: ts(record), raw: p });
         } else if (type === "function_call" || type === "custom_tool_call" || type === "web_search_call") {
           events.push({ id: "e" + record.line, kind: "tool_call", title: "tool call: " + (p.name ?? type), text: pretty(p.arguments ?? p.input ?? p), timestamp: ts(record), callId: p.call_id, toolName: p.name, status: "running", raw: p });
-        } else if (type === "function_call_output" || type === "custom_tool_call_output") {
-          events.push({ id: "e" + record.line, kind: "tool_result", title: "tool result" + (p.call_id ? ": " + p.call_id : ""), text: pretty(p.output), timestamp: ts(record), callId: p.call_id, status: "unknown", raw: p });
+        } else if (type === "function_call_output") {
+          const output = pretty(p.output);
+          events.push({ id: "e" + record.line, kind: "tool_result", title: "tool result" + (p.call_id ? ": " + p.call_id : ""), text: output, timestamp: ts(record), callId: p.call_id, status: statusFromOutput(output), raw: p });
+        } else if (type === "custom_tool_call_output") {
+          const output = pretty(p.output);
+          events.push({ id: "e" + record.line, kind: "tool_result", title: "tool result" + (p.call_id ? ": " + p.call_id : ""), text: output, timestamp: ts(record), callId: p.call_id, status: output.toLowerCase().includes("error") ? "error" : "unknown", raw: p });
         }
         continue;
       }
@@ -784,7 +815,7 @@ mark { background: var(--mark); color: var(--ink); padding: 0 1px; }
         const role = m.role ?? v.type ?? "message";
         const content = m.content;
         const images = imageBlocks(content);
-        const messageContent = Array.isArray(content) ? content.filter((block) => !(isObject(block) && block.type === "thinking")) : content;
+        const messageContent = Array.isArray(content) ? content.filter((block) => !(isObject(block) && ["thinking", "tool_use", "tool_result"].includes(block.type))) : content;
         const text = textBlocks(messageContent);
         if (text || images.length) events.push({ id: "e" + record.line, kind: role === "system" ? "system" : "message", role, title: String(role), text, images: images.length ? images : undefined, timestamp: v.timestamp, raw: v });
         for (const block of Array.isArray(content) ? content : []) {
@@ -1109,7 +1140,5 @@ mark { background: var(--mark); color: var(--ink); padding: 0 1px; }
   else if (embedded.kind === "raw") loadDoc(parseRaw(decodeBase64(embedded.data), "embedded session"));
   else render();
 })();
-</script>
-</body>
-</html>`;
+</script>`;
 }

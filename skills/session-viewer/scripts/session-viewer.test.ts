@@ -5,14 +5,44 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import vm from "node:vm";
 import { parseSessionDocument } from "./core/detect.ts";
 import { basename, parseJsonl } from "./core/jsonl.ts";
+import { buildSessionViewerHtml } from "./html.ts";
 
 const execFileAsync = promisify(execFile);
 
 function parse(text: string) {
   const { records } = parseJsonl(text);
   return parseSessionDocument(records, "fixture.jsonl");
+}
+
+// html.ts's --raw/--blank embed modes ship a second, browser-only
+// re-implementation of session parsing (it can't import the TS importers
+// directly -- there's no bundler in this zero-dependency skill). That
+// duplication has drifted from the source of truth before; extract the actual
+// shipped client script and run its pure parseRaw/statusFromOutput helpers
+// directly (no DOM needed -- they're plain data transforms) so a future edit
+// to one side without the other fails a test instead of shipping silently.
+function extractClientParseRaw(): {
+  parseRaw: (text: string, name?: string) => { format: string; title: string; meta: object; events: any[] };
+  statusFromOutput: (output: unknown) => string;
+} {
+  const html = buildSessionViewerHtml(null, { embedMode: "blank" });
+  const openMarker = "<script>\n(() => {\n";
+  const openIndex = html.lastIndexOf(openMarker);
+  assert.notEqual(openIndex, -1, "expected to find the client script in generated HTML");
+  const bodyStart = openIndex + openMarker.length;
+  const boundaryMarker = "const indexEvent = (event) => {";
+  const boundaryIndex = html.indexOf(boundaryMarker, bodyStart);
+  assert.notEqual(boundaryIndex, -1, "expected parseRaw to precede indexEvent in the client script");
+  const snippet = html.slice(bodyStart, boundaryIndex);
+  // Only `state`'s initializer touches a browser global before the boundary
+  // (localStorage.getItem, for the persisted theme/view-mode); parseRaw and its
+  // dependencies are otherwise plain data transforms with no DOM access.
+  const sandbox: Record<string, unknown> = { localStorage: { getItem: () => null, setItem: () => {} } };
+  vm.runInNewContext(`${snippet}\nglobalThis.__snapshot = { parseRaw, statusFromOutput };`, sandbox);
+  return sandbox.__snapshot as ReturnType<typeof extractClientParseRaw>;
 }
 
 test("basename returns the last non-empty path segment", () => {
@@ -809,4 +839,61 @@ test("CLI writes a one-file HTML export", async () => {
   )?.[1];
   assert.ok(payload);
   assert.equal(JSON.parse(payload).kind, "normalized");
+});
+
+test("client-side raw parser excludes tool_result blocks from merged Claude message text", () => {
+  const { parseRaw } = extractClientParseRaw();
+  const doc = parseRaw(
+    JSON.stringify({
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          { type: "text", text: "please continue" },
+          { type: "tool_result", tool_use_id: "call1", content: "SECRET_TOOL_OUTPUT" },
+        ],
+      },
+    }),
+  );
+  assert.equal(doc.format, "claude");
+  const message = doc.events.find((event: any) => event.kind === "message");
+  assert.equal(message?.text, "please continue");
+  assert.doesNotMatch(message?.text ?? "", /SECRET_TOOL_OUTPUT/);
+  const result = doc.events.find((event: any) => event.kind === "tool_result");
+  assert.equal(result?.text, "SECRET_TOOL_OUTPUT");
+});
+
+test("client-side raw parser derives Codex function_call_output status from the process exit code", () => {
+  const { parseRaw } = extractClientParseRaw();
+  const doc = parseRaw(
+    [
+      JSON.stringify({ type: "session_meta", payload: { id: "x" } }),
+      JSON.stringify({
+        type: "response_item",
+        payload: { type: "function_call_output", call_id: "c1", output: "Process exited with code 0" },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        payload: { type: "function_call_output", call_id: "c2", output: "Process exited with code 1" },
+      }),
+    ].join("\n"),
+  );
+  const results = doc.events.filter((event: any) => event.kind === "tool_result");
+  assert.equal(results.find((event: any) => event.callId === "c1")?.status, "ok");
+  assert.equal(results.find((event: any) => event.callId === "c2")?.status, "error");
+});
+
+test("client-side raw parser reads reasoning summary text from either field name", () => {
+  const { parseRaw } = extractClientParseRaw();
+  const doc = parseRaw(
+    [
+      JSON.stringify({ type: "session_meta", payload: { id: "x" } }),
+      JSON.stringify({
+        type: "response_item",
+        payload: { type: "reasoning", summary: [{ summary: "design approach" }] },
+      }),
+    ].join("\n"),
+  );
+  const reasoning = doc.events.find((event: any) => event.kind === "reasoning");
+  assert.equal(reasoning?.text, "design approach");
 });
