@@ -6,7 +6,8 @@
 # re-serializes with jq so byte layout matches the auto path (both go through `jq .`).
 set -euo pipefail
 FORM="${1:?filled review sheet}"
-DIR="$(cd "$(dirname "$0")/.." && pwd)"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+DIR="$SKILL_DIR"
 # extract the first fenced json block
 BLK="$(awk '/^```json$/{f=1;next} /^```$/{f=0} f' "$FORM")"
 [ -n "$BLK" ] || { echo "human-seat-to-json: no \`\`\`json block in $FORM" >&2; exit 1; }

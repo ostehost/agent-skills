@@ -1,7 +1,7 @@
 ---
 # L0 FROZEN brief front matter. Pin the design.md spec commit you validated against.
 design_md_spec_commit: "REPLACE_WITH_PINNED_SHA"   # design.md is ALPHA — pin it
-brief_hash: ""                                      # filled by just verify-substrate
+brief_hash: ""                                      # filled during substrate verification
 frozen: true
 viewports: [1440, 768, 375]                        # invariant 3 (widths). heights in capture-shots.sh
 ---

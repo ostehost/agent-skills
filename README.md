@@ -169,6 +169,8 @@ python3 -m py_compile skills/autoreview/scripts/autoreview skills/autoreview/scr
 python3 skills/autoreview/scripts/autoreview.test.py
 node --check skills/agent-transcript/scripts/agent-transcript
 node --test skills/agent-transcript/scripts/agent-transcript.test.mjs skills/session-viewer/scripts/session-viewer.test.ts
+skills/design-competition/scripts/check-conformance.sh
+skills/design-competition/scripts/scripts.test.sh
 ```
 
 The validator checks every `skills/*/SKILL.md` for YAML frontmatter with required

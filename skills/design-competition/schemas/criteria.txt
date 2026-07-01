@@ -1,0 +1,6 @@
+# Single source of truth for the four rubric criteria (rubric.json's criteria list).
+# Consumed by: validate-critique.sh. One key per line. Lines starting with # and blank lines are ignored.
+design_quality
+originality
+craft
+functionality

@@ -4,7 +4,7 @@ set -euo pipefail
 
 MODE="${MODE:-auto}"              # auto | human  (the ONLY mode branch: which evaluator to invoke)
 PROJECT="${PROJECT:-$PWD}"
-SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 MAX_ROUNDS="${MAX_ROUNDS:-12}"    # range 5-15 [V]; ceiling >15 unverified
 MAX_BUDGET_USD="${MAX_BUDGET_USD:-25}"
 PORT="${PORT:-4173}"

@@ -6,7 +6,8 @@
 # the four criteria, the 0.5 score grid in 1..5 (or null), and the verdict/severity enums.
 set -euo pipefail
 DOC="${1:?critique json}"; SCHEMA="${2:-}"   # SCHEMA arg accepted for ajv-compatible call shape; unused here
-DIR="$(cd "$(dirname "$0")/.." && pwd)"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+DIR="$SKILL_DIR"
 # NOTE: ajv against schemas/critique.schema.json is AUTHORITATIVE. This jq fallback enforces only the
 # load-bearing subset (it does NOT implement additionalProperties:false, enums, or types) so the harness
 # runs on a stock box. Seat-blindness here is the NAMED-KEY defense; structural closure needs ajv.
@@ -19,6 +20,12 @@ jq -e . "$DOC" >/dev/null 2>&1 || fail "not valid JSON: $DOC"
 #    Forbidden list is SINGLE-SOURCED from schemas/forbidden-keys.txt (M2 — was drifting across 3 files).
 FORBIDDEN="$(grep -vE '^[[:space:]]*#|^[[:space:]]*$' "$DIR/schemas/forbidden-keys.txt" | paste -sd'|' -)"
 [ -n "$FORBIDDEN" ] || fail "empty/absent schemas/forbidden-keys.txt"
+
+# Criteria list is single-sourced from schemas/criteria.txt, mirroring the
+# forbidden-keys.txt pattern above (was hand-copied 4x in this file alone).
+CRITERIA="$(grep -vE '^[[:space:]]*#|^[[:space:]]*$' "$DIR/schemas/criteria.txt")"
+[ -n "$CRITERIA" ] || fail "empty/absent schemas/criteria.txt"
+CRITERIA_JSON="$(printf '%s\n' "$CRITERIA" | jq -R . | jq -sc .)"
 if jq -r 'paths|map(tostring)|join(".")' "$DOC" | grep -Eiq "(^|\.)(${FORBIDDEN})(\.|$)"; then
   jq -r 'paths|map(tostring)|join(".")' "$DOC" | grep -Ei "(^|\.)(${FORBIDDEN})(\.|$)" >&2
   fail "forbidden seat-correlated key present (must live in critique-<k>.audit.json sidecar)"
@@ -34,11 +41,11 @@ jq -e '.schema_version=="l6/3.0"' "$DOC" >/dev/null || fail "schema_version must
 jq -e '.verdict as $v | ["PASS","NEEDS_WORK","UNRENDERABLE"]|index($v)' "$DOC" >/dev/null || fail "bad verdict enum"
 
 # 4. four criteria present, each {rationale,score}; score null OR on 0.5 grid in [1,5]
-for c in design_quality originality craft functionality; do
+while IFS= read -r c; do
   jq -e --arg c "$c" '.scores[$c]|has("rationale") and has("score")' "$DOC" >/dev/null || fail "scores.$c missing rationale/score"
   jq -e --arg c "$c" '.scores[$c].score as $s | ($s==null) or ($s>=1 and $s<=5 and (($s*2)|floor)==($s*2))' "$DOC" >/dev/null \
     || fail "scores.$c.score off the 0.5 grid / out of 1..5"
-done
+done <<< "$CRITERIA"
 
 # 5. null scores ONLY allowed when verdict==UNRENDERABLE
 if jq -e '.verdict!="UNRENDERABLE" and ([.scores[].score]|any(.==null))' "$DOC" >/dev/null; then
@@ -47,15 +54,15 @@ fi
 
 # 6. change_request severities + criteria enums
 jq -e '[.change_requests[]?.severity]|all(["blocker","major","medium","nitpick"]|index(.)!=null)' "$DOC" >/dev/null || fail "bad change_request severity"
-jq -e '[.change_requests[]?.criterion]|all(["design_quality","originality","craft","functionality"]|index(.)!=null)' "$DOC" >/dev/null || fail "bad change_request criterion"
+jq -e --argjson c "$CRITERIA_JSON" '[.change_requests[]?.criterion]|all(. as $x | $c|index($x)!=null)' "$DOC" >/dev/null || fail "bad change_request criterion"
 
 # 7. viewports pinned to exactly [1440,768,375] (order-free)
 jq -e '(.viewports|sort)==( [375,768,1440] )' "$DOC" >/dev/null || fail "viewports must be 1440/768/375"
 
 # 8. gate.per_criterion keys
-jq -e '.gate.per_criterion | keys | sort == ["craft","design_quality","functionality","originality"]' "$DOC" >/dev/null || fail "gate.per_criterion must contain exactly the 4 criteria keys"
-for c in design_quality originality craft functionality; do
+jq -e --argjson c "$CRITERIA_JSON" '.gate.per_criterion | keys | sort == ($c|sort)' "$DOC" >/dev/null || fail "gate.per_criterion must contain exactly the 4 criteria keys"
+while IFS= read -r c; do
   jq -e --arg c "$c" '.gate.per_criterion[$c] | type == "boolean"' "$DOC" >/dev/null || fail "gate.per_criterion.$c must be boolean"
-done
+done <<< "$CRITERIA"
 
 echo "ok: $DOC"

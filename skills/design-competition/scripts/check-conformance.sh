@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CONFORMANCE CHECK for the shared contracts (run via `just check-conformance`).
+# CONFORMANCE CHECK for the shared contracts (run via `./check-conformance.sh`).
 # Proves, against the ACTUAL files (not prose):
 #   C1  Schema is seat-blind by construction: additionalProperties:false at every object
 #       level AND no seat-correlated key is declared anywhere in schemas/critique.schema.json.
@@ -12,7 +12,8 @@
 #   C6  RUBRIC weight DIRECTION asserted (design+originality > craft+functionality) and numbers
 #       labeled unverified.
 set -euo pipefail
-P="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+P="$SKILL_DIR"
 S="$P/scripts"
 SCHEMA="$P/schemas/critique.schema.json"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
