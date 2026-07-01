@@ -9,6 +9,11 @@ Public shared skills for agent workflows.
 - Keep secrets, private hostnames, private account IDs, and private URLs out.
 - Skill descriptions: short trigger phrase, not full documentation.
 - Skill bodies: operational, terse, current.
+- Frontmatter: `name` and `description` are required (validated). `user-invocable`
+  is the one other field in use here (design-competition) — a host-read flag for
+  direct/slash invocation, not something this repo's own tooling checks. Don't
+  add other one-off frontmatter fields without a real consumer; nothing enforces
+  they stay current otherwise.
 - Helper scripts belong under `skills/<name>/scripts/`.
 - Validate after edits: `scripts/validate-skills`.
 - Do not edit generated/vendor copies in downstream repos; update here, then sync.
@@ -32,5 +37,6 @@ Public shared skills for agent workflows.
 
 ## Layout
 
-- `skills/autoreview`: shared closeout/code-review helper.
-- `skills/crabbox`: shared Crabbox/Testbox remote validation workflow.
+See README.md's "Included Skills" list for the current skill inventory —
+kept there as the single copy so this section can't drift out of sync with it
+again.
