@@ -166,6 +166,7 @@ ruby -c scripts/install-skills && ruby -c scripts/validate-skills
 ruby scripts/install-skills.test.rb && ruby scripts/validate-skills.test.rb
 bash -n skills/autoreview/scripts/test-review-harness
 python3 -m py_compile skills/autoreview/scripts/autoreview skills/autoreview/scripts/test-review-harness.py
+python3 skills/autoreview/scripts/autoreview.test.py
 node --check skills/agent-transcript/scripts/agent-transcript
 node --test skills/agent-transcript/scripts/agent-transcript.test.mjs skills/session-viewer/scripts/session-viewer.test.ts
 ```

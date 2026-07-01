@@ -482,50 +482,54 @@ def write_json_temp(data: dict[str, Any]) -> Path:
     return Path(handle.name)
 
 
+def raise_if_failed(result: subprocess.CompletedProcess[str], engine: str) -> None:
+    if result.returncode != 0:
+        raise SystemExit(f"{engine} engine failed ({result.returncode})\n{result.stderr or result.stdout}")
+
+
 def run_codex(args: argparse.Namespace, repo: Path, prompt: str) -> str:
     if not args.tools:
         raise SystemExit("--no-tools is not supported by the Codex engine; use --engine claude --no-tools for a no-tools run")
     schema_path = write_json_temp(SCHEMA)
     output_path = Path(tempfile.NamedTemporaryFile("w", suffix=".json", delete=False).name)
-    cmd = [resolve_command(args.codex_bin, repo), "--ask-for-approval", "never"]
-    if args.web_search:
-        cmd.append("--search")
-    if args.model:
-        cmd.extend(["--model", args.model])
-    if args.thinking:
-        cmd.extend(["-c", f'model_reasoning_effort="{args.thinking}"'])
-    cmd.append("exec")
-    if args.stream_engine_output:
-        cmd.append("--json")
-    cmd.extend(
-        [
-            "--ephemeral",
-            "-C",
-            str(repo),
-            "-s",
-            "read-only",
-            "--output-schema",
-            str(schema_path),
-            "--output-last-message",
-            str(output_path),
-            "-",
-        ]
-    )
-    result = run_with_heartbeat(
-        cmd,
-        repo,
-        input_text=prompt,
-        label="codex",
-        stream_output=args.stream_engine_output,
-        stream_display=CodexStreamDisplay() if args.stream_engine_output else None,
-    )
     try:
+        cmd = [resolve_command(args.codex_bin, repo), "--ask-for-approval", "never"]
+        if args.web_search:
+            cmd.append("--search")
+        if args.model:
+            cmd.extend(["--model", args.model])
+        if args.thinking:
+            cmd.extend(["-c", f'model_reasoning_effort="{args.thinking}"'])
+        cmd.append("exec")
+        if args.stream_engine_output:
+            cmd.append("--json")
+        cmd.extend(
+            [
+                "--ephemeral",
+                "-C",
+                str(repo),
+                "-s",
+                "read-only",
+                "--output-schema",
+                str(schema_path),
+                "--output-last-message",
+                str(output_path),
+                "-",
+            ]
+        )
+        result = run_with_heartbeat(
+            cmd,
+            repo,
+            input_text=prompt,
+            label="codex",
+            stream_output=args.stream_engine_output,
+            stream_display=CodexStreamDisplay() if args.stream_engine_output else None,
+        )
         output = output_path.read_text()
     finally:
         schema_path.unlink(missing_ok=True)
         output_path.unlink(missing_ok=True)
-    if result.returncode != 0:
-        raise SystemExit(f"codex engine failed ({result.returncode})\n{result.stderr or result.stdout}")
+    raise_if_failed(result, "codex")
     return output or result.stdout
 
 
@@ -557,8 +561,7 @@ def run_claude(args: argparse.Namespace, repo: Path, prompt: str) -> str:
         stream_output=args.stream_engine_output,
         stream_display=ClaudeStreamDisplay() if args.stream_engine_output else None,
     )
-    if result.returncode != 0:
-        raise SystemExit(f"claude engine failed ({result.returncode})\n{result.stderr or result.stdout}")
+    raise_if_failed(result, "claude")
     return result.stdout
 
 
@@ -567,24 +570,26 @@ def run_droid(args: argparse.Namespace, repo: Path, prompt: str) -> str:
         raise SystemExit("--thinking is not supported by the droid engine")
     prompt_path = Path(tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False).name)
     prompt_path.write_text(prompt)
-    cmd = [
-        resolve_command(args.droid_bin, repo),
-        "exec",
-        "--cwd",
-        str(repo),
-        "--output-format",
-        "json",
-        "-f",
-        str(prompt_path),
-    ]
-    if args.model:
-        cmd.extend(["--model", args.model])
-    if not args.tools:
-        cmd.extend(["--disabled-tools", "*"])
-    result = run_with_heartbeat(cmd, repo, label="droid", stream_output=args.stream_engine_output)
-    prompt_path.unlink(missing_ok=True)
-    if result.returncode != 0:
-        raise SystemExit(f"droid engine failed ({result.returncode})\n{result.stderr or result.stdout}")
+    os.chmod(prompt_path, 0o600)
+    try:
+        cmd = [
+            resolve_command(args.droid_bin, repo),
+            "exec",
+            "--cwd",
+            str(repo),
+            "--output-format",
+            "json",
+            "-f",
+            str(prompt_path),
+        ]
+        if args.model:
+            cmd.extend(["--model", args.model])
+        if not args.tools:
+            cmd.extend(["--disabled-tools", "*"])
+        result = run_with_heartbeat(cmd, repo, label="droid", stream_output=args.stream_engine_output)
+    finally:
+        prompt_path.unlink(missing_ok=True)
+    raise_if_failed(result, "droid")
     return result.stdout
 
 
@@ -624,16 +629,45 @@ def run_copilot(args: argparse.Namespace, repo: Path, prompt: str) -> str:
         if args.web_search:
             cmd.append("--allow-all-urls")
         result = run_with_heartbeat(cmd, Path(tempdir), label="copilot", stream_output=args.stream_engine_output)
-    if result.returncode != 0:
-        raise SystemExit(f"copilot engine failed ({result.returncode})\n{result.stderr or result.stdout}")
+    raise_if_failed(result, "copilot")
     return result.stdout
 
 
-class CodexStreamDisplay:
-    def __init__(self, *, activity_seconds: int = 20) -> None:
+class _ActivityStreamDisplay:
+    """Shared hidden/visible-line bookkeeping for the per-engine stream displays.
+
+    Subclasses implement only the engine-specific event parsing (__call__ and
+    friends); this base owns when to coalesce quiet events into one activity
+    line vs. let something through immediately.
+    """
+
+    def __init__(self, *, activity_label: str, activity_seconds: int = 20) -> None:
+        self.activity_label = activity_label
         self.activity_seconds = activity_seconds
         self.hidden_events = 0
         self.last_visible = time.monotonic()
+
+    def hidden_activity(self) -> str | None:
+        self.hidden_events += 1
+        if time.monotonic() - self.last_visible < self.activity_seconds:
+            return None
+        return self.visible(self.flush_hidden())
+
+    def flush_hidden(self) -> str:
+        if not self.hidden_events:
+            return ""
+        count = self.hidden_events
+        self.hidden_events = 0
+        return f"{self.activity_label} activity: {count} hidden tool/status events\n"
+
+    def visible(self, text: str) -> str:
+        self.last_visible = time.monotonic()
+        return text
+
+
+class CodexStreamDisplay(_ActivityStreamDisplay):
+    def __init__(self, *, activity_seconds: int = 20) -> None:
+        super().__init__(activity_label="codex", activity_seconds=activity_seconds)
 
     def __call__(self, name: str, line: str) -> str | None:
         if name != "stdout":
@@ -656,29 +690,10 @@ class CodexStreamDisplay:
             return self.visible(self.flush_hidden() + item["text"].rstrip() + "\n")
         return self.hidden_activity()
 
-    def hidden_activity(self) -> str | None:
-        self.hidden_events += 1
-        if time.monotonic() - self.last_visible < self.activity_seconds:
-            return None
-        return self.visible(self.flush_hidden())
 
-    def flush_hidden(self) -> str:
-        if not self.hidden_events:
-            return ""
-        count = self.hidden_events
-        self.hidden_events = 0
-        return f"codex activity: {count} hidden tool/status events\n"
-
-    def visible(self, text: str) -> str:
-        self.last_visible = time.monotonic()
-        return text
-
-
-class ClaudeStreamDisplay:
+class ClaudeStreamDisplay(_ActivityStreamDisplay):
     def __init__(self, *, activity_seconds: int = 20) -> None:
-        self.activity_seconds = activity_seconds
-        self.hidden_events = 0
-        self.last_visible = time.monotonic()
+        super().__init__(activity_label="claude", activity_seconds=activity_seconds)
         self.started = False
 
     def __call__(self, name: str, line: str) -> str | None:
@@ -729,23 +744,6 @@ class ClaudeStreamDisplay:
         if isinstance(cost, (int, float)) and not isinstance(cost, bool):
             fields.append(f"cost_usd={cost:.6f}")
         return "claude usage: " + " ".join(fields) + "\n" if fields else "claude turn completed\n"
-
-    def hidden_activity(self) -> str | None:
-        self.hidden_events += 1
-        if time.monotonic() - self.last_visible < self.activity_seconds:
-            return None
-        return self.visible(self.flush_hidden())
-
-    def flush_hidden(self) -> str:
-        if not self.hidden_events:
-            return ""
-        count = self.hidden_events
-        self.hidden_events = 0
-        return f"claude activity: {count} hidden tool/status events\n"
-
-    def visible(self, text: str) -> str:
-        self.last_visible = time.monotonic()
-        return text
 
 
 def format_codex_usage(usage: dict[str, Any]) -> str:
@@ -844,8 +842,13 @@ def parse_json_candidate(text: str) -> Any | None:
     return parsed
 
 
-def validate_report(report: dict[str, Any], repo: Path, changed_paths: set[str], required: list[str]) -> None:
-    allowed_top = {"findings", "overall_correctness", "overall_explanation", "overall_confidence"}
+FINDING_SCHEMA: dict[str, Any] = SCHEMA["properties"]["findings"]["items"]
+
+
+def validate_shape(report: dict[str, Any]) -> None:
+    """Check the report matches SCHEMA. Raises SystemExit with a readable message
+    on the first violation; does not mutate `report` or filter findings."""
+    allowed_top = set(SCHEMA["properties"])
     extra_top = set(report) - allowed_top
     if extra_top:
         raise SystemExit(f"review JSON has unexpected top-level keys: {sorted(extra_top)}")
@@ -854,21 +857,25 @@ def validate_report(report: dict[str, Any], repo: Path, changed_paths: set[str],
             raise SystemExit(f"review JSON missing required key: {key}")
     if not isinstance(report["findings"], list):
         raise SystemExit("review JSON findings must be an array")
-    if report.get("overall_correctness") not in {"patch is correct", "patch is incorrect"}:
+    correctness_enum = set(SCHEMA["properties"]["overall_correctness"]["enum"])
+    if report.get("overall_correctness") not in correctness_enum:
         raise SystemExit(f"review JSON has invalid overall_correctness: {report.get('overall_correctness')}")
     if not isinstance(report.get("overall_explanation"), str) or not report["overall_explanation"]:
         raise SystemExit("review JSON overall_explanation must be a non-empty string")
-    if len(report["overall_explanation"]) > 3000:
+    explanation_max = SCHEMA["properties"]["overall_explanation"]["maxLength"]
+    if len(report["overall_explanation"]) > explanation_max:
         raise SystemExit("review JSON overall_explanation is too long")
     if not number_in_range(report.get("overall_confidence")):
         raise SystemExit("review JSON overall_confidence must be numeric")
-    finding_text = ""
-    kept_findings: list[dict[str, Any]] = []
-    ignored_findings: list[tuple[int, dict[str, Any], str, int]] = []
+
+    allowed_finding = set(FINDING_SCHEMA["properties"])
+    title_max = FINDING_SCHEMA["properties"]["title"]["maxLength"]
+    body_max = FINDING_SCHEMA["properties"]["body"]["maxLength"]
+    priority_enum = set(FINDING_SCHEMA["properties"]["priority"]["enum"])
+    category_enum = set(FINDING_SCHEMA["properties"]["category"]["enum"])
     for index, finding in enumerate(report["findings"]):
         if not isinstance(finding, dict):
             raise SystemExit(f"finding {index} must be an object")
-        allowed_finding = {"title", "body", "priority", "confidence", "category", "code_location"}
         extra_finding = set(finding) - allowed_finding
         if extra_finding:
             raise SystemExit(f"finding {index} has unexpected keys: {sorted(extra_finding)}")
@@ -876,18 +883,18 @@ def validate_report(report: dict[str, Any], repo: Path, changed_paths: set[str],
             if key not in finding:
                 raise SystemExit(f"finding {index} missing required key: {key}")
         title = finding.get("title")
-        if not isinstance(title, str) or not title or len(title) > 140:
+        if not isinstance(title, str) or not title or len(title) > title_max:
             raise SystemExit(f"finding {index} has invalid title")
         body = finding.get("body")
-        if not isinstance(body, str) or not body or len(body) > 2000:
+        if not isinstance(body, str) or not body or len(body) > body_max:
             raise SystemExit(f"finding {index} has invalid body")
         priority = finding.get("priority")
-        if priority not in {"P0", "P1", "P2", "P3"}:
+        if priority not in priority_enum:
             raise SystemExit(f"finding {index} has invalid priority: {priority}")
         if not number_in_range(finding.get("confidence")):
             raise SystemExit(f"finding {index} has invalid confidence")
         category = finding.get("category")
-        if category not in {"bug", "security", "regression", "test_gap", "maintainability"}:
+        if category not in category_enum:
             raise SystemExit(f"finding {index} has invalid category: {category}")
         location = finding.get("code_location")
         if not isinstance(location, dict):
@@ -898,29 +905,53 @@ def validate_report(report: dict[str, Any], repo: Path, changed_paths: set[str],
             raise SystemExit(f"finding {index} has invalid location: {location}")
         if Path(rel).is_absolute() or ".." in Path(rel).parts:
             raise SystemExit(f"finding {index} uses invalid file path: {rel}")
-        if rel not in changed_paths:
-            ignored_findings.append((index, finding, rel, line))
-            continue
-        kept_findings.append(finding)
-        finding_text += "\n" + json.dumps(finding, sort_keys=True)
+
+
+def filter_in_scope_findings(
+    findings: list[dict[str, Any]], changed_paths: set[str]
+) -> tuple[list[dict[str, Any]], list[tuple[int, dict[str, Any], str, int]]]:
+    """Split shape-valid findings into (kept, ignored) by whether their
+    code_location falls inside changed_paths. Assumes validate_shape already
+    ran, so each finding's code_location is present and well-formed."""
+    kept: list[dict[str, Any]] = []
+    ignored: list[tuple[int, dict[str, Any], str, int]] = []
+    for index, finding in enumerate(findings):
+        location = finding["code_location"]
+        rel = str(location["file_path"]).strip()
+        line = location["line"]
+        if rel in changed_paths:
+            kept.append(finding)
+        else:
+            ignored.append((index, finding, rel, line))
+    return kept, ignored
+
+
+def report_ignored_findings(ignored: list[tuple[int, dict[str, Any], str, int]]) -> None:
+    for index, finding, rel, line in ignored:
+        title = finding.get("title", "<untitled>")
+        print(f"autoreview ignored out-of-scope finding {index}: {title} ({rel}:{line})", file=sys.stderr)
+        print(bounded_field(str(finding.get("body", "")), 500), file=sys.stderr)
+
+
+def require_finding_text(findings: list[dict[str, Any]], required: list[str]) -> None:
+    haystack = "\n".join(json.dumps(finding, sort_keys=True) for finding in findings).lower()
+    for needle in required:
+        if needle.lower() not in haystack:
+            raise SystemExit(f"required finding text not found: {needle}")
+
+
+def validate_report(report: dict[str, Any], changed_paths: set[str], required: list[str]) -> None:
+    validate_shape(report)
+    kept_findings, ignored_findings = filter_in_scope_findings(report["findings"], changed_paths)
     if ignored_findings:
-        for index, finding, rel, line in ignored_findings:
-            title = finding.get("title", "<untitled>")
-            print(
-                f"autoreview ignored out-of-scope finding {index}: {title} ({rel}:{line})",
-                file=sys.stderr,
-            )
-            print(bounded_field(str(finding.get("body", "")), 500), file=sys.stderr)
+        report_ignored_findings(ignored_findings)
         report["findings"] = kept_findings
         if not kept_findings and report["overall_correctness"] == "patch is incorrect":
             note = f"Ignored {len(ignored_findings)} out-of-scope finding(s) outside the reviewed change."
             explanation = report["overall_explanation"].rstrip()
             report["overall_correctness"] = "patch is correct"
             report["overall_explanation"] = bounded_field(f"{explanation}\n\n{note}", 3000)
-    haystack = finding_text.lower()
-    for needle in required:
-        if needle.lower() not in haystack:
-            raise SystemExit(f"required finding text not found: {needle}")
+    require_finding_text(report["findings"], required)
 
 
 def number_in_range(value: Any) -> bool:
@@ -1119,7 +1150,7 @@ def reviewer_label(args: argparse.Namespace) -> str:
 def run_reviewer(args: argparse.Namespace, repo: Path, prompt: str, changed_paths: set[str], required: list[str]) -> dict[str, Any]:
     raw = run_engine(args, repo, prompt)
     report = extract_json(raw)
-    validate_report(report, repo, changed_paths, required)
+    validate_report(report, changed_paths, required)
     return report
 
 
@@ -1176,7 +1207,7 @@ def run_panel(args: argparse.Namespace, reviewers: list[argparse.Namespace], rep
         raise SystemExit("autoreview panel produced no reports")
     reports.sort(key=lambda item: item[0])
     report = merge_panel_reports(reports)
-    validate_report(report, repo, changed_paths, args.require_finding)
+    validate_report(report, changed_paths, args.require_finding)
     return report
 
 
@@ -1232,8 +1263,10 @@ def main() -> int:
             original_stdout = sys.stdout
             with Path(args.output).open("w") as handle:
                 sys.stdout = Tee(original_stdout, handle)
-                print_report(report, label=label)
-                sys.stdout = original_stdout
+                try:
+                    print_report(report, label=label)
+                finally:
+                    sys.stdout = original_stdout
         else:
             print_report(report, label=label)
     finally:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import shutil
 import stat
@@ -9,10 +10,26 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Callable
+from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
 
-ENGINES = ("codex", "claude", "droid", "copilot")
+def _load_autoreview_engines() -> tuple[str, ...]:
+    """Import the sibling `autoreview` script's ENGINES tuple directly, rather
+    than hand-copying the engine list, so the two can't silently drift. autoreview
+    has no .py suffix, so spec_from_file_location can't infer a loader for it --
+    an explicit SourceFileLoader is required."""
+    autoreview_path = Path(__file__).resolve().parent / "autoreview"
+    loader = SourceFileLoader("autoreview", str(autoreview_path))
+    spec = importlib.util.spec_from_loader("autoreview", loader)
+    if spec is None:
+        raise ImportError(f"cannot load {autoreview_path}")
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module.ENGINES
+
+
+ENGINES = _load_autoreview_engines()
 DEFAULT_ENGINES = ("codex", "claude")
 
 MALICIOUS_INITIAL = """export function uploadPath(name) {
