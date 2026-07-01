@@ -12,8 +12,8 @@ See the included `README.md` and `WORKFLOW.md` for detailed rules on how to run 
 
 ## Dependencies
 
-- **Required:** `jq`
-- **Optional/Contextual:** `claude` (for AI evaluator), `playwright` (for Auto mode), `montage`/ImageMagick (for contact sheets), and `ajv` (for strict JSON schema validation).
+- **Required:** `jq`, `claude`, `git`
+- **Optional/contextual:** Playwright/MCP (for Auto mode), ImageMagick `montage` (for contact sheets), and `ajv` (for strict JSON schema validation).
 
 ## Quick Start
 1. Provide a `DESIGN.md` and `BRIEF.yaml` in the project root to define the L0/L1 intent.

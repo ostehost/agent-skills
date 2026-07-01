@@ -15,6 +15,7 @@ repo.
 - `autoreview`: structured closeout/code-review workflow plus helper script.
 - `crabbox`: Crabbox/Testbox remote validation workflow for broad or CI-parity
   proof.
+- `design-competition`: frontend generator-evaluator harness with Playwright or Human review.
 - `handoff`: path-free prompt handoff workflow for delegating a task to another
   agent.
 - `session-viewer`: local searchable HTML viewer for agent session JSONL.
@@ -137,6 +138,11 @@ skills/
     scripts/
   crabbox/
     SKILL.md
+  design-competition/
+    SKILL.md
+    scripts/
+    schemas/
+    templates/
   handoff/
     SKILL.md
   session-viewer/

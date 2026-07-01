@@ -76,14 +76,18 @@ adv2b=$(printf '%s' "$GATED" | jq '.gate.per_criterion.seat = 7')         # lite
 if "$S/validate-critique.sh" <(printf '%s' "$adv2b") "$SCHEMA" >/dev/null 2>&1; then
   die "C2b jq validator ACCEPTED a forbidden 'seat' key inside per_criterion"
 fi
+adv2=$(printf '%s' "$GATED" | jq '.gate.per_criterion.x_seatchan = 7')   # novel (non-listed) key
+if "$S/validate-critique.sh" <(printf '%s' "$adv2") "$SCHEMA" >/dev/null 2>&1; then
+  die "C2b jq validator ACCEPTED a novel key in per_criterion"
+fi
+
 if command -v ajv >/dev/null 2>&1; then
-  adv2=$(printf '%s' "$GATED" | jq '.gate.per_criterion.x_seatchan = 7')   # novel (non-listed) key
   printf '%s' "$adv2" > "$TMP/adv2.json"
   ajv validate --spec=draft2020 -s "$SCHEMA" -d "$TMP/adv2.json" >/dev/null 2>&1 \
     && die "C2b schema ACCEPTED a novel key in per_criterion (structural seat channel still open)" || true
-  pass "C2b seat channels closed: jq rejects named keys; ajv rejects novel keys in per_criterion"
+  pass "C2b seat channels closed: jq and ajv reject novel keys in per_criterion"
 else
-  pass "C2b jq rejects named seat keys in per_criterion (install ajv to also prove novel-key closure; free-text watermarks remain unpoliceable by design)"
+  pass "C2b seat channels closed: jq rejects novel keys in per_criterion (install ajv for full schema closure proof)"
 fi
 
 # ---- C3 both validate --------------------------------------------------------
