@@ -3,6 +3,7 @@
 
 require "fileutils"
 require "optparse"
+require_relative "lib/skill_repo"
 
 def same_real_path?(left, right)
   File.realpath(left) == File.realpath(right)
@@ -10,8 +11,7 @@ rescue Errno::ENOENT
   false
 end
 
-root = File.expand_path("..", __dir__)
-skills_root = File.join(root, "skills")
+root = SkillRepo.root
 
 options = {
   target: File.expand_path("~/.agents/skills"),
@@ -43,7 +43,12 @@ unless %w[symlink copy].include?(options[:mode])
   exit 2
 end
 
-available = Dir.children(skills_root).select { |name| File.file?(File.join(skills_root, name, "SKILL.md")) }.sort
+available = SkillRepo.names(root)
+
+if available.empty?
+  warn "No skills/*/SKILL.md files found."
+  exit 1
+end
 
 if options[:list]
   puts available.join("\n")
@@ -62,7 +67,7 @@ end
 FileUtils.mkdir_p(options[:target]) unless options[:dry_run]
 
 selected.each do |name|
-  source = File.join(skills_root, name)
+  source = File.join(SkillRepo.skills_root(root), name)
   target = File.join(options[:target], name)
 
   if File.exist?(target) || File.symlink?(target)

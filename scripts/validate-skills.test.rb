@@ -1,34 +1,22 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-require "fileutils"
 require "json"
 require "minitest/autorun"
-require "open3"
-require "tmpdir"
+require_relative "test_helper"
 
 class ValidateSkillsTest < Minitest::Test
+  include ScriptTestRepo
+
   # Build a throwaway repo with the validator copied in, the given skills written
   # as skills/<name>/SKILL.md, and an optional skills.sh.json manifest, then run it.
   def run_validate(skills:, manifest: nil)
-    Dir.mktmpdir do |dir|
-      FileUtils.mkdir_p(File.join(dir, "scripts"))
-      FileUtils.cp(File.join(__dir__, "validate-skills"), File.join(dir, "scripts", "validate-skills"))
-
-      skills.each do |name, frontmatter|
-        skill_dir = File.join(dir, "skills", name)
-        FileUtils.mkdir_p(skill_dir)
-        File.write(File.join(skill_dir, "SKILL.md"), frontmatter)
-      end
-      File.write(File.join(dir, "skills.sh.json"), manifest) if manifest
-
-      yield(*Open3.capture3(RbConfig.ruby, File.join(dir, "scripts", "validate-skills")))
+    build_script_repo("validate-skills", skills: skills, manifest: manifest) do |dir|
+      yield(*run_script(dir, "validate-skills"))
     end
   end
 
-  def good(name)
-    "---\nname: #{name}\ndescription: does #{name} things\n---\n"
-  end
+  alias_method :good, :good_frontmatter
 
   def grouping(*names)
     JSON.generate("groupings" => [{ "title" => "Group", "skills" => names }])

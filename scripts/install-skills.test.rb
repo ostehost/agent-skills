@@ -3,24 +3,15 @@
 
 require "fileutils"
 require "minitest/autorun"
-require "open3"
-require "tmpdir"
+require_relative "test_helper"
 
 class InstallSkillsTest < Minitest::Test
-  def test_force_skips_target_that_is_source
-    Dir.mktmpdir do |dir|
-      FileUtils.mkdir_p(File.join(dir, "scripts"))
-      FileUtils.mkdir_p(File.join(dir, "skills", "sample"))
-      FileUtils.cp(File.join(__dir__, "install-skills"), File.join(dir, "scripts", "install-skills"))
-      File.write(File.join(dir, "skills", "sample", "SKILL.md"), "---\nname: sample\ndescription: sample\n---\n")
+  include ScriptTestRepo
 
-      stdout, stderr, status = Open3.capture3(
-        RbConfig.ruby,
-        File.join(dir, "scripts", "install-skills"),
-        "--target",
-        File.join(dir, "skills"),
-        "--force",
-        "sample"
+  def test_force_skips_target_that_is_source
+    build_script_repo("install-skills", skills: { "sample" => good_frontmatter("sample") }) do |dir|
+      stdout, stderr, status = run_script(
+        dir, "install-skills", "--target", File.join(dir, "skills"), "--force", "sample"
       )
 
       assert status.success?, stderr
@@ -32,38 +23,29 @@ class InstallSkillsTest < Minitest::Test
   end
 
   def test_force_copy_replaces_existing_symlink
-    Dir.mktmpdir do |dir|
-      FileUtils.mkdir_p(File.join(dir, "repo", "scripts"))
-      FileUtils.mkdir_p(File.join(dir, "repo", "skills", "sample"))
-      FileUtils.mkdir_p(File.join(dir, "target"))
-      FileUtils.cp(File.join(__dir__, "install-skills"), File.join(dir, "repo", "scripts", "install-skills"))
-      File.write(File.join(dir, "repo", "skills", "sample", "SKILL.md"), "---\nname: sample\ndescription: sample\n---\n")
-      FileUtils.ln_s(File.join(dir, "repo", "skills", "sample"), File.join(dir, "target", "sample"))
+    build_script_repo("install-skills", skills: { "sample" => good_frontmatter("sample") }) do |dir|
+      target_dir = File.join(dir, "target")
+      FileUtils.mkdir_p(target_dir)
+      FileUtils.ln_s(File.join(dir, "skills", "sample"), File.join(target_dir, "sample"))
 
-      stdout, stderr, status = Open3.capture3(
-        RbConfig.ruby,
-        File.join(dir, "repo", "scripts", "install-skills"),
-        "--target",
-        File.join(dir, "target"),
-        "--force",
-        "--mode",
-        "copy",
-        "sample"
+      stdout, stderr, status = run_script(
+        dir, "install-skills", "--target", target_dir, "--force", "--mode", "copy", "sample"
       )
 
       assert status.success?, stderr
       assert_includes stdout, "copy sample"
-      refute File.symlink?(File.join(dir, "target", "sample"))
-      copied = File.join(dir, "target", "sample", "SKILL.md")
-      source = File.join(dir, "repo", "skills", "sample", "SKILL.md")
+      refute File.symlink?(File.join(target_dir, "sample"))
+      copied = File.join(target_dir, "sample", "SKILL.md")
+      source = File.join(dir, "skills", "sample", "SKILL.md")
       assert File.exist?(copied), "expected copy at #{copied}"
       assert File.exist?(source), "expected source at #{source} to remain"
     end
   end
 
   def test_list_prints_available_skills_sorted
-    with_repo(%w[charlie alpha bravo]) do |scripts_dir|
-      stdout, _stderr, status = Open3.capture3(RbConfig.ruby, File.join(scripts_dir, "install-skills"), "--list")
+    skills = %w[charlie alpha bravo].to_h { |name| [name, good_frontmatter(name)] }
+    build_script_repo("install-skills", skills: skills) do |dir|
+      stdout, _stderr, status = run_script(dir, "install-skills", "--list")
 
       assert status.success?
       assert_equal %w[alpha bravo charlie], stdout.split("\n")
@@ -71,8 +53,8 @@ class InstallSkillsTest < Minitest::Test
   end
 
   def test_unknown_skill_fails
-    with_repo do |scripts_dir|
-      stdout, stderr, status = Open3.capture3(RbConfig.ruby, File.join(scripts_dir, "install-skills"), "nope")
+    build_script_repo("install-skills", skills: { "sample" => good_frontmatter("sample") }) do |dir|
+      stdout, stderr, status = run_script(dir, "install-skills", "nope")
 
       refute status.success?
       assert_includes stderr, "unknown skill(s): nope"
@@ -80,16 +62,41 @@ class InstallSkillsTest < Minitest::Test
     end
   end
 
-  # Build a temp repo with install-skills and the named skills, yield its scripts dir.
-  def with_repo(names = ["sample"])
-    Dir.mktmpdir do |dir|
-      FileUtils.mkdir_p(File.join(dir, "scripts"))
-      FileUtils.cp(File.join(__dir__, "install-skills"), File.join(dir, "scripts", "install-skills"))
-      names.each do |name|
-        FileUtils.mkdir_p(File.join(dir, "skills", name))
-        File.write(File.join(dir, "skills", name, "SKILL.md"), "---\nname: #{name}\ndescription: #{name}\n---\n")
-      end
-      yield File.join(dir, "scripts")
+  def test_dry_run_leaves_target_untouched
+    build_script_repo("install-skills", skills: { "sample" => good_frontmatter("sample") }) do |dir|
+      target_dir = File.join(dir, "target")
+      stdout, _stderr, status = run_script(dir, "install-skills", "--target", target_dir, "--dry-run", "sample")
+
+      assert status.success?
+      assert_includes stdout, "would symlink sample"
+      refute File.exist?(target_dir), "dry-run must not create the target directory"
+    end
+  end
+
+  def test_default_skip_if_exists
+    build_script_repo("install-skills", skills: { "sample" => good_frontmatter("sample") }) do |dir|
+      target_dir = File.join(dir, "target")
+      FileUtils.mkdir_p(File.join(target_dir, "sample"))
+      original_marker = File.join(target_dir, "sample", "marker")
+      File.write(original_marker, "keep me")
+
+      stdout, stderr, status = run_script(dir, "install-skills", "--target", target_dir, "sample")
+
+      assert status.success?, stderr
+      assert_includes stderr, "exists, skipping"
+      assert_empty stdout
+      assert File.exist?(original_marker), "non-forced reinstall must not touch an existing target"
+    end
+  end
+
+  def test_invalid_mode_fails
+    build_script_repo("install-skills", skills: { "sample" => good_frontmatter("sample") }) do |dir|
+      stdout, stderr, status = run_script(dir, "install-skills", "--mode", "bogus", "sample")
+
+      refute status.success?
+      assert_equal 2, status.exitstatus
+      assert_includes stderr, "invalid --mode: bogus"
+      assert_empty stdout
     end
   end
 end

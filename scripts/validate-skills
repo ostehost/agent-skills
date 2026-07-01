@@ -4,6 +4,7 @@
 require "json"
 require "set"
 require "yaml"
+require_relative "lib/skill_repo"
 
 Encoding.default_external = Encoding::UTF_8
 Encoding.default_internal = Encoding::UTF_8
@@ -104,15 +105,16 @@ def check_manifest_skill(rel, title, name, available, seen)
   errors
 end
 
-root = File.expand_path("..", __dir__)
-skill_files = Dir.glob(File.join(root, "skills", "*", "SKILL.md")).sort
+root = SkillRepo.root
+available_names = SkillRepo.names(root)
 
-if skill_files.empty?
+if available_names.empty?
   warn "No skills/*/SKILL.md files found."
   exit 1
 end
 
-available = skill_files.map { |path| File.basename(File.dirname(path)) }.to_set
+skill_files = available_names.map { |name| File.join(SkillRepo.skills_root(root), name, "SKILL.md") }
+available = available_names.to_set
 manifest = File.join(root, "skills.sh.json")
 manifest_present = File.exist?(manifest)
 
