@@ -223,22 +223,34 @@ function hasSetupBlob(text) {
   );
 }
 
+// Shape rules whose replacement fully replaces the matched secret, so re-testing
+// the same (non-global) regex against already-redacted text can never self-match.
+// unsafe() reuses these as its fail-closed superset re-check.
+const REDACT_SHAPE_RULES = [
+  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[REDACTED_PRIVATE_KEY]"],
+  [/sk-[A-Za-z0-9_-]{20,}/g, "[REDACTED_OPENAI_KEY]"],
+  [/(gh[pousr]_[A-Za-z0-9_]{20,})/g, "[REDACTED_GITHUB_TOKEN]"],
+  [/(AKIA[0-9A-Z]{16})/g, "[REDACTED_AWS_KEY]"],
+  [/eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}/g, "[REDACTED_JWT]"],
+  [/\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{16,}/gi, "[REDACTED_AUTH_HEADER]"],
+  [/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[REDACTED_EMAIL]"],
+  [/\b(?:\+?\d[\d .()-]{7,}\d)\b/g, "[REDACTED_PHONE]"],
+  [/\/Users\/[^\s`"'>)]+/g, "[LOCAL_PATH]"],
+  [/\/home\/[^\s`"'>)]+/g, "[LINUX_HOME_PATH]"],
+  [/~\/[^\s`"'>)]+/g, "[HOME_PATH]"],
+];
+
+// Excluded from the shape superset above: its replacement ("$1[REDACTED]") keeps
+// the param name on purpose, which would otherwise always re-match itself right
+// after a successful redaction.
+const QUERY_SECRET_PARAM_RULE = [
+  /([?&](?:token|key|secret|signature|sig|access_token|auth)=)[^\s`"'>&]+/gi,
+  "$1[REDACTED]",
+];
+
 function redact(input, stats) {
   let s = String(input ?? "");
-  const rules = [
-    [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[REDACTED_PRIVATE_KEY]"],
-    [/sk-[A-Za-z0-9_-]{20,}/g, "[REDACTED_OPENAI_KEY]"],
-    [/(gh[pousr]_[A-Za-z0-9_]{20,})/g, "[REDACTED_GITHUB_TOKEN]"],
-    [/(AKIA[0-9A-Z]{16})/g, "[REDACTED_AWS_KEY]"],
-    [/eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}/g, "[REDACTED_JWT]"],
-    [/\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{16,}/gi, "[REDACTED_AUTH_HEADER]"],
-    [/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[REDACTED_EMAIL]"],
-    [/\b(?:\+?\d[\d .()-]{7,}\d)\b/g, "[REDACTED_PHONE]"],
-    [/\/Users\/[^\s`"'>)]+/g, "[LOCAL_PATH]"],
-    [/~\/[^\s`"'>)]+/g, "[HOME_PATH]"],
-    [/([?&](?:token|key|secret|signature|sig|access_token|auth)=)[^\s`"'>&]+/gi, "$1[REDACTED]"],
-  ];
-  for (const [re, repl] of rules) {
+  for (const [re, repl] of [...REDACT_SHAPE_RULES, QUERY_SECRET_PARAM_RULE]) {
     const before = s;
     s = s.replace(re, repl);
     if (s !== before) stats.redactions++;
@@ -247,14 +259,19 @@ function redact(input, stats) {
 }
 
 function unsafe(text) {
-  const patterns = [
-    /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
-    /\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{16,}/i,
+  const shapePatterns = REDACT_SHAPE_RULES.map(([re]) => new RegExp(re.source, re.flags.replace("g", "")));
+  const extraPatterns = [
     /\b(?:user_session|_gh_sess|__Host-user_session_same_site|GH_SESSION_TOKEN)\b/i,
     /\b(?:GITHUB_TOKEN|GH_TOKEN|OPENAI_API_KEY|ANTHROPIC_API_KEY)\b/,
     /\/upload\/policies\/assets|uploadToken|authenticity_token/i,
   ];
-  return patterns.filter((pattern) => pattern.test(text)).map((pattern) => String(pattern));
+  return [...shapePatterns, ...extraPatterns].filter((pattern) => pattern.test(text)).map((pattern) => String(pattern));
+}
+
+// Fail-closed gate every render path must pass through before writing output.
+function assertSafe(rendered) {
+  if (!rendered.safe) throw new Error(`unsafe transcript after redaction: ${rendered.unsafeAfter.join(", ")}`);
+  return rendered;
 }
 
 function normalizeEntry(role, text, stats, options = {}) {
@@ -368,6 +385,52 @@ function recountEntries(stats, entries) {
   stats.assistant = entries.filter((entry) => entry.startsWith("[assistant]\n")).length;
 }
 
+// Shared tail of renderSession/renderThread: coalesce, truncate, and compute the
+// fail-closed safety verdict (over both the transcript body and the redacted
+// title/url header, since that header line is also embedded in the markdown).
+function finalizeTranscript(items, stats, options) {
+  const renderedItems = coalesceEntries(items);
+  recountEntries(stats, renderedItems);
+  const maxChars = optionNumber(options, "maxChars", "max-chars", DEFAULT_MAX_CHARS);
+  let joined = renderedItems.join("\n\n");
+  if (joined.length > maxChars) {
+    joined = `${joined.slice(0, maxChars).trimEnd()}\n\n...[transcript truncated to ${maxChars} chars]`;
+  }
+  // Redact the header before the safety check, not after: unsafe() now shares
+  // redact()'s shape rules, so checking the raw title/url would fail closed on
+  // ordinary values (an email, a local path) that redact() safely handles.
+  const headerBits = redact([options.title, options.url].filter(Boolean).join(" | "), stats);
+  const unsafeAfter = [...unsafe(joined), ...unsafe(headerBits)];
+  const safe = unsafeAfter.length === 0;
+  return { joined, headerBits, unsafeAfter, safe };
+}
+
+// Shared markdown template for renderSession/renderThread; `extraLines` carries
+// the one field that varies beyond the source label (renderThread's `thread:` id).
+// `headerBits` is already redacted by finalizeTranscript.
+function buildMarkdown({ sourceLabel, extraLines = [], summaryLabel, headerBits, joined, stats }) {
+  const summarySuffix = headerBits ? `: ${headerBits}` : "";
+  const extra = extraLines.length ? `${extraLines.join("\n")}\n` : "";
+  return `${MARKER_START}
+## Agent Transcript
+
+<details>
+<summary>Redacted ${summaryLabel}${summarySuffix}</summary>
+
+\`\`\`\`text
+source: ${sourceLabel}
+${extra}redaction: local paths, emails, phone-shaped strings, token-shaped strings, auth headers, auth query params
+omitted: raw tool outputs, system/developer prompts, local paths, secrets, browser/session/auth details
+stats: ${JSON.stringify(stats)}
+
+${joined}
+\`\`\`\`
+
+</details>
+${MARKER_END}
+`;
+}
+
 function expandCompactedReplacementItems(row) {
   if (row?.type !== "compacted") return [];
   const replacementHistory = row.payload?.replacement_history;
@@ -439,32 +502,14 @@ function renderSession(file, options = {}) {
     items.push(`[tool summary]\n${compactToolSummary(toolCounts, stats.toolOutputsDropped)}`);
     stats.entries++;
   }
-  const renderedItems = coalesceEntries(items);
-  recountEntries(stats, renderedItems);
-  const maxChars = optionNumber(options, "maxChars", "max-chars", DEFAULT_MAX_CHARS);
-  let joined = renderedItems.join("\n\n");
-  if (joined.length > maxChars) joined = `${joined.slice(0, maxChars).trimEnd()}\n\n...[transcript truncated to ${maxChars} chars]`;
-  const headerBits = [options.title, options.url].filter(Boolean).join(" | ");
-  const unsafeAfter = unsafe(joined);
-  const safe = unsafeAfter.length === 0;
-  const markdown = `${MARKER_START}
-## Agent Transcript
-
-<details>
-<summary>Redacted ${agent} session transcript${headerBits ? `: ${redact(headerBits, stats)}` : ""}</summary>
-
-\`\`\`\`text
-source: [LOCAL_SESSION]
-redaction: local paths, emails, phone-shaped strings, token-shaped strings, auth headers, auth query params
-omitted: raw tool outputs, system/developer prompts, local paths, secrets, browser/session/auth details
-stats: ${JSON.stringify(stats)}
-
-${joined}
-\`\`\`\`
-
-</details>
-${MARKER_END}
-`;
+  const { joined, headerBits, unsafeAfter, safe } = finalizeTranscript(items, stats, options);
+  const markdown = buildMarkdown({
+    sourceLabel: "[LOCAL_SESSION]",
+    summaryLabel: `${agent} session transcript`,
+    headerBits,
+    joined,
+    stats,
+  });
   return { file, agent, safe, unsafeAfter, stats, markdown };
 }
 
@@ -589,33 +634,15 @@ async function renderThread(threadId, options = {}) {
       if (role === "assistant") stats.assistant++;
     }
   }
-  const renderedItems = coalesceEntries(items);
-  recountEntries(stats, renderedItems);
-  const maxChars = optionNumber(options, "maxChars", "max-chars", DEFAULT_MAX_CHARS);
-  let joined = renderedItems.join("\n\n");
-  if (joined.length > maxChars) joined = `${joined.slice(0, maxChars).trimEnd()}\n\n...[transcript truncated to ${maxChars} chars]`;
-  const headerBits = [options.title, options.url].filter(Boolean).join(" | ");
-  const unsafeAfter = unsafe(joined);
-  const safe = unsafeAfter.length === 0;
-  const markdown = `${MARKER_START}
-## Agent Transcript
-
-<details>
-<summary>Redacted codex app-server transcript${headerBits ? `: ${redact(headerBits, stats)}` : ""}</summary>
-
-\`\`\`\`text
-source: codex app-server thread/read includeTurns
-thread: ${redact(threadId, stats)}
-redaction: local paths, emails, phone-shaped strings, token-shaped strings, auth headers, auth query params
-omitted: raw tool outputs, system/developer prompts, local paths, secrets, browser/session/auth details
-stats: ${JSON.stringify(stats)}
-
-${joined}
-\`\`\`\`
-
-</details>
-${MARKER_END}
-`;
+  const { joined, headerBits, unsafeAfter, safe } = finalizeTranscript(items, stats, options);
+  const markdown = buildMarkdown({
+    sourceLabel: "codex app-server thread/read includeTurns",
+    extraLines: [`thread: ${redact(threadId, stats)}`],
+    summaryLabel: "codex app-server transcript",
+    headerBits,
+    joined,
+    stats,
+  });
   return { file: null, agent: "codex", safe, unsafeAfter, stats, markdown };
 }
 
@@ -794,24 +821,21 @@ async function main() {
   }
   if (command === "render") {
     if (!args.session) throw new Error("--session is required");
-    const rendered = await renderTranscript(args);
-    if (!rendered.safe) throw new Error(`unsafe transcript after redaction: ${rendered.unsafeAfter.join(", ")}`);
+    const rendered = assertSafe(await renderTranscript(args));
     if (args.out) fs.writeFileSync(args.out, rendered.markdown);
     else process.stdout.write(rendered.markdown);
     return;
   }
   if (command === "render-thread") {
     if (!args["thread-id"] && !args.threadId) throw new Error("--thread-id is required");
-    const rendered = await renderThread(args.threadId || args["thread-id"], args);
-    if (!rendered.safe) throw new Error(`unsafe transcript after redaction: ${rendered.unsafeAfter.join(", ")}`);
+    const rendered = assertSafe(await renderThread(args.threadId || args["thread-id"], args));
     if (args.out) fs.writeFileSync(args.out, rendered.markdown);
     else process.stdout.write(rendered.markdown);
     return;
   }
   if (command === "preview") {
     if (!args.session) throw new Error("--session is required");
-    const rendered = await renderTranscript(args);
-    if (!rendered.safe) throw new Error(`unsafe transcript after redaction: ${rendered.unsafeAfter.join(", ")}`);
+    const rendered = assertSafe(await renderTranscript(args));
     const output = singlePreviewDocument({
       title: args.title || "Agent Transcript Preview",
       url: args.url || "",
@@ -825,8 +849,7 @@ async function main() {
   }
   if (command === "append-body") {
     if (!args.body || !args.session) throw new Error("--body and --session are required");
-    const rendered = await renderTranscript(args);
-    if (!rendered.safe) throw new Error(`unsafe transcript after redaction: ${rendered.unsafeAfter.join(", ")}`);
+    const rendered = assertSafe(await renderTranscript(args));
     const body = fs.readFileSync(args.body, "utf8");
     const next = replaceSection(body, rendered.markdown);
     if (args.out) fs.writeFileSync(args.out, next);
@@ -855,7 +878,7 @@ async function main() {
         continue;
       }
       try {
-        const rendered = await renderTranscript({ ...args, session: candidate.file, title: pr.title, url: pr.url });
+        const rendered = assertSafe(await renderTranscript({ ...args, session: candidate.file, title: pr.title, url: pr.url }));
         records.push({
           ...pr,
           session: candidate.file,
