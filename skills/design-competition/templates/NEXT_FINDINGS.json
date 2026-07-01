@@ -1,0 +1,26 @@
+{
+  "schema_version": "l6/3.0",
+  "candidate_id": "main",
+  "round": 0,
+  "critique_index": 0,
+  "viewports": [1440, 768, 375],
+  "rubric_ref": "l5/rubric@PLACEHOLDER",
+  "axe_core_version": "PLACEHOLDER",
+  "scores": {
+    "design_quality": { "rationale": "seed: no prior round", "score": null },
+    "originality": { "rationale": "seed: no prior round", "score": null },
+    "craft": { "rationale": "seed: no prior round", "score": null },
+    "functionality": { "rationale": "seed: no prior round", "score": null }
+  },
+  "ai_slop_flags": [],
+  "quality_floor": {
+    "responsive_1440": false, "responsive_768": false, "responsive_375": false,
+    "visible_keyboard_focus": false, "contrast_AA_4_5": false
+  },
+  "change_requests": [],
+  "gate": { "per_criterion": {}, "floor_breaches": [], "blocking_change_requests": 0 },
+  "verdict": "UNRENDERABLE",
+  "weighted_total": null,
+  "recommendation": "refine",
+  "recommendation_rationale": "round 0 seed baton; generate first build"
+}

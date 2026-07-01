@@ -1,0 +1,29 @@
+# L7 control config. ALL numbers UNVERIFIED placeholders.
+mode: auto                 # auto | human  (selects evaluator at invocation only; X3')
+max_rounds: 12             # range 5-15 [V]; >15 ceiling unverified
+max_budget_usd: 25
+
+stop_conditions:           # success-first; PASS is NEVER terminal (C8)
+  converged_exit: false    # optional UNVERIFIED convenience; off by default
+  iter_cap: true
+  budget: true
+  plateau:
+    window_k: 3            # running-best flat for k rounds; suspended post-pivot (grace)
+    metric: weighted_total # ranking-only; gate stays on per-criterion + floor
+  regression_gate:
+    enabled: true          # revert-to-best-then-refine on per-criterion drop
+
+judge_noise:
+  k_sampling_auto: 3       # auto only; median; samples -> sidecar
+  epsilon_floor_above_stddev: true
+  confidence_gating: false # R-CONFIDENCE/M7: NEVER gate on self-reported confidence
+
+anti_fixation:
+  novelty:
+    representation: rendered    # R-NOVELTY/M4: pHash+SSIM over shots, NOT code embeddings
+    min_perceptual_distance: 0.0 # UNVERIFIED threshold
+  supervisor: agents/supervisor.md   # CRDAL; writes only STEER.md
+
+precondition:
+  assert_weight_direction: true      # P2: abort on equal/inverted weights
+  assert_axe_version_match: true      # P3/M5: rubric.json == manifest == artifact

@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness/schemas/critique.schema.json",
+  "title": "L6 gated critique artifact (seat-blind, byte-identical across seats)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version","candidate_id","round","critique_index","viewports","rubric_ref","axe_core_version","scores","ai_slop_flags","quality_floor","change_requests","gate","verdict","weighted_total","recommendation"],
+  "properties": {
+    "schema_version": { "const": "l6/3.0" },
+    "candidate_id": { "type": "string" },
+    "round": { "type": "integer", "minimum": 0 },
+    "critique_index": { "type": "integer", "minimum": 0, "description": "disambiguates hybrid rounds; NOT a seat tag" },
+    "viewports": { "type": "array", "items": { "enum": [1440,768,375] }, "minItems": 3, "maxItems": 3 },
+    "rubric_ref": { "type": "string" },
+    "axe_core_version": { "type": "string", "description": "pinned oracle version; must match rubric.json + manifest (M5)" },
+    "scores": {
+      "type": "object", "additionalProperties": false,
+      "required": ["design_quality","originality","craft","functionality"],
+      "properties": {
+        "design_quality": { "$ref": "#/$defs/scoreObj" },
+        "originality": { "$ref": "#/$defs/scoreObj" },
+        "craft": { "$ref": "#/$defs/scoreObj" },
+        "functionality": { "$ref": "#/$defs/scoreObj" }
+      }
+    },
+    "ai_slop_flags": { "type": "array", "items": { "type": "string" } },
+    "quality_floor": {
+      "type": "object", "additionalProperties": false,
+      "required": ["responsive_1440","responsive_768","responsive_375","visible_keyboard_focus","contrast_AA_4_5"],
+      "properties": {
+        "responsive_1440": { "type": "boolean" },
+        "responsive_768": { "type": "boolean" },
+        "responsive_375": { "type": "boolean" },
+        "visible_keyboard_focus": { "type": "boolean" },
+        "contrast_AA_4_5": { "type": "boolean" },
+        "reduced_motion_respected": { "type": "boolean", "description": "OPTIONAL house rule (AAA 2.3.3, NOT AA)" }
+      }
+    },
+    "change_requests": { "type": "array", "items": { "$ref": "#/$defs/changeRequest" } },
+    "gate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["per_criterion","floor_breaches","blocking_change_requests"],
+      "properties": {
+        "per_criterion": {
+          "type": "object", "additionalProperties": false,
+          "description": "M2: CLOSED — per-criterion threshold pass/fail only. Closing this removes the last structural seat channel (review probe adv2/adv2b).",
+          "required": ["design_quality","originality","craft","functionality"],
+          "properties": {
+            "design_quality": { "type": "boolean" },
+            "originality": { "type": "boolean" },
+            "craft": { "type": "boolean" },
+            "functionality": { "type": "boolean" }
+          }
+        },
+        "floor_breaches": { "type": "array", "items": { "type": "string" } },
+        "blocking_change_requests": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "verdict": { "enum": ["PASS","NEEDS_WORK","UNRENDERABLE"] },
+    "weighted_total": { "type": ["number","null"], "description": "ranking-only = weighted_sum - penalty; NEVER gates; null if UNRENDERABLE" },
+    "recommendation": { "enum": ["refine","pivot"], "description": "ADVISORY; generator owns the actual move" },
+    "recommendation_rationale": { "type": "string" }
+  },
+  "$comment": "SEAT-BLIND CONTRACT: additionalProperties:false at every object level forbids any seat/evaluator/samples/stdev/eval_steps/score_ev/verdict_ab/verdict_ba/flip_rate/audit/confidence key in the gated artifact. Those live ONLY in the loop-blind critique-<k>.audit.json sidecar. Score grid enforced by multipleOf:0.5 + min 1 / max 5 so both seats emit on the identical value grid.",
+  "$defs": {
+    "scoreObj": {
+      "type": "object", "additionalProperties": false,
+      "required": ["rationale","score"],
+      "properties": {
+        "rationale": { "type": "string", "minLength": 1 },
+        "score": { "type": ["number","null"], "minimum": 1, "maximum": 5, "multipleOf": 0.5, "description": "0.5 grid both seats; null ONLY when verdict==UNRENDERABLE" }
+      }
+    },
+    "changeRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["criterion","expected","observed","evidence","severity"],
+      "properties": {
+        "criterion": { "enum": ["design_quality","originality","craft","functionality"] },
+        "type": { "type": "string", "description": "e.g. aesthetic|a11y|token_conformance|render_error" },
+        "expected": { "type": "string" },
+        "observed": { "type": "string" },
+        "evidence": { "type": "string", "description": "shots/<w>.png | console line | tokens/...:NN | axe:<rule>" },
+        "severity": { "enum": ["blocker","major","medium","nitpick"] },
+        "fix": { "type": "string" }
+      }
+    }
+  }
+}

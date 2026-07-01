@@ -1,0 +1,50 @@
+{
+  "rubric_version": "l5/1.0.0",
+  "_unverified": "ALL numbers below are UNVERIFIED placeholders encoding the VERIFIED weight DIRECTION (design+originality > craft+functionality). The per-criterion hard-threshold GATE is VERIFIED for Anthropic's CODING harness; its transfer to DESIGN criteria is UNVERIFIED.",
+  "judge_model_id": "REPLACE_MULTIMODAL_MODEL_ID",
+  "generator_model_id": "REPLACE_GENERATOR_MODEL_ID",
+  "prompt_template_hash": "",
+  "axe_core_version": "4.12.1",
+  "_axe_note": "Pinned 2026-06 (4.12.0 changed the active ruleset: added aria-tab-name, deprecated landmark-complementary-is-top-level). Must match RUN_MANIFEST.json + each artifact's axe_core_version (L7 precondition P3).",
+  "scoring_mode": "absolute",
+  "scale": { "min": 1, "max": 5, "step": 0.5 },
+  "judge_params": { "temperature": 0 },
+  "anti_bias": {
+    "require_cross_family_evaluator": true,
+    "_cross_family_note": "M1: judge_model_id family MUST differ from generator_model_id family. Self-preference tracks self-recognition/familiarity (Panickssery 2404.13076; Wataoka 2410.21819). The k=3 ensemble below MUST be a cross-family PANEL, not same-model self-consistency (Verga, Replacing Judges with Juries 2404.18796).",
+    "length_neutral": true,
+    "_length_note": "M1: position-swap does NOT neutralize verbosity bias (Length-Controlled AlpacaEval 2404.04475). The evaluator MUST judge against the brief, never reward length/verbosity. Lock both model ids in the run manifest.",
+    "verified": false
+  },
+  "weight_direction": {
+    "assert": "design_quality + originality > craft + functionality",
+    "verified": true,
+    "_note": "DIRECTION is VERIFIED (Anthropic harness post). The exact weights are UNVERIFIED. L7 precondition P2 aborts the loop if the numeric weights below violate this direction."
+  },
+  "criteria": [
+    { "id": "design_quality", "axis": "creative", "weight": 0.35, "threshold": 3, "ensemble": true },
+    { "id": "originality",    "axis": "creative", "weight": 0.35, "threshold": 3, "ensemble": true },
+    { "id": "craft",          "axis": "execution", "weight": 0.20, "threshold": 2, "ensemble": false },
+    { "id": "functionality",  "axis": "execution", "weight": 0.10, "threshold": 2, "ensemble": false }
+  ],
+  "quality_floor": [
+    { "key": "responsive_1440", "source": "capture+axe" },
+    { "key": "responsive_768",  "source": "capture+axe" },
+    { "key": "responsive_375",  "source": "capture+axe" },
+    { "key": "visible_keyboard_focus", "source": "axe" },
+    { "key": "contrast_AA_4_5", "source": "axe:color-contrast" }
+  ],
+  "_floor_note": "PARTIAL automated floor. axe-core auto-detects ~57% of WCAG issues; ~43% need human judgment (Deque: deque.com/automated-accessibility-coverage-report). The floor is NOT WCAG-complete. Human-seat 43%-class findings enter as advisory change_requests, not floor keys. Standard targeted: WCAG 2.2 AA (current W3C Recommendation).",
+  "penalty_cap": 1.0,
+  "_slop_flag_note": "pattern_verified=true means the PATTERN is a real SKILL.md AI-slop tell (verified). The penalty NUMBER is UNVERIFIED in every case (see file header).",
+  "slop_flags": [
+    { "id": "cluster_cream_serif", "penalty": 0.4, "pattern_verified": true },
+    { "id": "cluster_dark_acid",   "penalty": 0.4, "pattern_verified": true },
+    { "id": "cluster_broadsheet",  "penalty": 0.4, "pattern_verified": true },
+    { "id": "motion_scatter",      "penalty": 0.2, "pattern_verified": true },
+    { "id": "numbered_markers",    "penalty": 0.2, "pattern_verified": true },
+    { "id": "copy_templated",      "penalty": 0.2, "pattern_verified": true },
+    { "id": "banned_font_list",    "penalty": 0.0, "pattern_verified": false }
+  ],
+  "ensemble": { "k": 3, "cross_family": true, "_note": "auto seat only; CROSS-FAMILY panel (M1), per-criterion voting on creative axes; samples/stdev -> sidecar, never gated" }
+}

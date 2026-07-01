@@ -1,0 +1,36 @@
+# L1 BRIEF.yaml — read by the generator every pass alongside DESIGN.md + tokens.
+
+# (A) Intent — constant across fan-out candidates
+intent:
+  subject: ""          # ONE concrete product
+  audience: ""
+  job: ""              # ONE user action
+  tone: ""
+  tone_extreme: ""     # how far to push it (UNVERIFIED leverage)
+
+# (B) Aesthetic direction — the ONLY part overridden per fan-out candidate
+aesthetic:
+  color: []            # 4-6 DTCG-aliased semantic roles into tokens/primitives
+  type: { display: "", body: "", utility: "" }
+  layout: ""           # prose + ASCII wireframe
+  motion: ""
+  signature: ""        # the one bold element
+  references: []
+  reference_images: [] # REQUIRED: judging is vision-grounded (invariant 8)
+  avoid:
+    - id: cluster_cream_serif
+      human_cue: "cream bg + serif display + terracotta"
+      auto_heuristic: "detect serif display + warm-neutral bg cluster"   # threshold calibrated by L5/L6
+
+# (C) FAIL-CLOSED pre-emit self-critique gate (NOT the rubric)
+self_critique:
+  status: UNSET        # generator MUST NOT emit code unless PASS and every axis non-null and >=3
+  axes: { design: null, originality: null, craft: null, functionality: null }
+
+# (D) Constraints
+constraints:
+  contrast: "WCAG 2.2 AA pairs (4.5:1 body, 3:1 large)"   # VERIFIED standard
+  signature_render_check: [1440, 768, 375]
+
+# Fan-out (parallel mode only): overrides Part B per candidate
+candidate_directions: {}   # e.g. { A: {tone_extreme: "maximal", persona: "..."}, B: {...} }

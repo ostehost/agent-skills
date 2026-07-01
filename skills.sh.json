@@ -16,6 +16,11 @@
       "title": "Sessions",
       "description": "Skills for inspecting and sharing local agent sessions.",
       "skills": ["session-viewer"]
+    },
+    {
+      "title": "Design",
+      "description": "Skills for evaluating and generating frontend UI.",
+      "skills": ["design-competition"]
     }
   ]
 }

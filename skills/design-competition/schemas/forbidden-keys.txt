@@ -1,0 +1,18 @@
+# Single source of truth for seat-correlated keys banned from the gated L6 artifact (invariant 1, M2).
+# Consumed by: validate-critique.sh, human-seat-to-json.sh, check-conformance.sh (C1).
+# These keys may appear ONLY in the loop-blind critique-<k>.audit.json sidecar.
+# One key per line. Lines starting with # and blank lines are ignored.
+seat
+evaluator
+samples
+stdev
+eval_steps
+score_ev
+verdict_ab
+verdict_ba
+flip_rate
+audit
+confidence
+self_preference
+generator_model_family
+method
