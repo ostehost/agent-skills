@@ -18,7 +18,7 @@
     "visible_keyboard_focus": false, "contrast_AA_4_5": false
   },
   "change_requests": [],
-  "gate": { "per_criterion": {}, "floor_breaches": [], "blocking_change_requests": 0 },
+  "gate": { "per_criterion": {"design_quality": false, "originality": false, "craft": false, "functionality": false}, "floor_breaches": [], "blocking_change_requests": 0 },
   "verdict": "UNRENDERABLE",
   "weighted_total": null,
   "recommendation": "refine",

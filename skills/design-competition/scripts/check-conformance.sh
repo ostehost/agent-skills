@@ -73,8 +73,9 @@ pass "C2 auto-emitted and human-emitted critique-<k>.json are byte-identical (NO
 # ---- C2b adversarial seat-channel regression (review probes adv1/adv2/adv2b) -
 # Honest about which validator catches what. Free-text watermarks (adv1) are NOT policeable by either.
 adv2b=$(printf '%s' "$GATED" | jq '.gate.per_criterion.seat = 7')         # literal forbidden key
-"$P/validate-critique.sh" <(printf '%s' "$adv2b") "$SCHEMA" >/dev/null 2>&1 \
-  && die "C2b jq validator ACCEPTED a forbidden 'seat' key inside per_criterion" || true
+if "$S/validate-critique.sh" <(printf '%s' "$adv2b") "$SCHEMA" >/dev/null 2>&1; then
+  die "C2b jq validator ACCEPTED a forbidden 'seat' key inside per_criterion"
+fi
 if command -v ajv >/dev/null 2>&1; then
   adv2=$(printf '%s' "$GATED" | jq '.gate.per_criterion.x_seatchan = 7')   # novel (non-listed) key
   printf '%s' "$adv2" > "$TMP/adv2.json"

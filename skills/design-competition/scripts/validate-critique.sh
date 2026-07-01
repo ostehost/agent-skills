@@ -52,4 +52,10 @@ jq -e '[.change_requests[]?.criterion]|all(["design_quality","originality","craf
 # 7. viewports pinned to exactly [1440,768,375] (order-free)
 jq -e '(.viewports|sort)==( [375,768,1440] )' "$DOC" >/dev/null || fail "viewports must be 1440/768/375"
 
+# 8. gate.per_criterion keys
+for c in design_quality originality craft functionality; do
+  jq -e --arg c "$c" '.gate.per_criterion | has($c)' "$DOC" >/dev/null || fail "gate.per_criterion.$c missing"
+  jq -e --arg c "$c" '.gate.per_criterion[$c] | type == "boolean"' "$DOC" >/dev/null || fail "gate.per_criterion.$c must be boolean"
+done
+
 echo "ok: $DOC"
