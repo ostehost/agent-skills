@@ -42,7 +42,7 @@ jobs:
           python skills/autoreview/scripts/autoreview --self-test-opencode-isolation
           python skills/autoreview/scripts/autoreview --self-test-cursor-jsonl-parser
       - name: Run Python tests
-        run: python -m unittest skills/autoreview/scripts/autoreview_test.py
+        run: python -m unittest skills/autoreview/scripts/autoreview_test.py skills.autoreview.tests.test_autoreview_hardening
       - name: Check Node scripts
         run: node --check skills/agent-transcript/scripts/agent-transcript
       - name: Run Node tests

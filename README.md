@@ -176,7 +176,7 @@ python3 skills/autoreview/scripts/autoreview --self-test-json-array-parser
 python3 skills/autoreview/scripts/autoreview --self-test-opencode-jsonl-parser
 python3 skills/autoreview/scripts/autoreview --self-test-opencode-isolation
 python3 skills/autoreview/scripts/autoreview --self-test-cursor-jsonl-parser
-python3 -m unittest skills/autoreview/scripts/autoreview_test.py
+python3 -m unittest skills/autoreview/scripts/autoreview_test.py skills.autoreview.tests.test_autoreview_hardening
 node --check skills/agent-transcript/scripts/agent-transcript
 node --test skills/agent-transcript/scripts/agent-transcript.test.mjs skills/session-viewer/scripts/session-viewer.test.ts
 ```
