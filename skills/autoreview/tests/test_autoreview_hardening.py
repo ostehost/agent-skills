@@ -131,6 +131,19 @@ class AutoreviewHardeningTests(unittest.TestCase):
             with self.subTest(rel=rel):
                 self.assertIsNone(self.helper["tracked_sensitive_repo_path_risk"](rel))
 
+    def test_tracked_env_variants_remain_sensitive(self) -> None:
+        for rel in (".env-local", ".env_prod", ".env/production"):
+            with self.subTest(rel=rel):
+                self.assertEqual(
+                    self.helper["tracked_sensitive_repo_path_risk"](rel),
+                    "sensitive filename",
+                )
+
+    def test_secret_detector_handles_quoted_json_keys(self) -> None:
+        content = '{"' + 'api_key": "' + "a" * 24 + '"}'
+
+        self.assertTrue(self.helper["secret_text_risk"](content))
+
     def test_secret_like_patch_content_is_blocked_in_all_modes(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             repo = init_repo(Path(tempdir))
