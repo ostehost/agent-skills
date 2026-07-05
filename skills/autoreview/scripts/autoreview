@@ -833,17 +833,21 @@ def require_no_secret_values(label: str, text: str) -> None:
 def unified_diff_content(patch: str) -> str:
     content: list[str] = []
     in_hunk = False
+    prefix_columns = 1
     for line in patch.splitlines():
-        if line.startswith("@@"):
+        hunk_header = re.match(r"^(@{2,})", line)
+        if hunk_header:
             content.append(";")
             in_hunk = True
+            prefix_columns = len(hunk_header.group(1)) - 1
             continue
-        if line.startswith("diff --git "):
+        if line.startswith("diff --"):
             content.append(";")
             in_hunk = False
             continue
-        if in_hunk and line[:1] in {"+", "-", " "}:
-            content.append(line[1:])
+        prefix = line[:prefix_columns]
+        if in_hunk and len(prefix) == prefix_columns and set(prefix) <= {"+", "-", " "}:
+            content.append(line[prefix_columns:])
     return "\n".join(content)
 
 

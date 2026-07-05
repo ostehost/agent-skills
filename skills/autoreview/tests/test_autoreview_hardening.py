@@ -205,6 +205,21 @@ class AutoreviewHardeningTests(unittest.TestCase):
             )
         )
 
+    def test_normalized_secret_scan_handles_combined_diff_prefixes(self) -> None:
+        value = "Correct-Horse!" + "@Battery$Staple"
+        patch = (
+            "diff --cc settings.json\n"
+            "@@@ -1,1 -1,1 +1,2 @@@\n"
+            '++"api_key":\n'
+            '++  "' + value + '"\n'
+        )
+
+        self.assertTrue(
+            self.helper["secret_text_risk"](
+                self.helper["unified_diff_content"](patch)
+            )
+        )
+
     def test_secret_like_patch_content_is_blocked_in_all_modes(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             repo = init_repo(Path(tempdir))
