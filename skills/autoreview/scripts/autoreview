@@ -82,7 +82,8 @@ TRACKED_SENSITIVE_NAME_PATTERNS = [
         re.IGNORECASE,
     ),
     re.compile(
-        r"(^|/)token(?:$|\.(json|ya?ml|toml|ini|conf|config)$)",
+        r"(^|/)(?:tokens?$|(?:[^/]*[._-])?tokens?(?:[._-][^/]*)?"
+        r"\.(json|ya?ml|toml|ini|conf|config)$)",
         re.IGNORECASE,
     ),
 ]

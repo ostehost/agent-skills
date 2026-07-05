@@ -144,6 +144,9 @@ class AutoreviewHardeningTests(unittest.TestCase):
             "credentials-prod.json",
             "service-account-dev.yaml",
             "api-key.backup.json",
+            "token-prod.json",
+            "tokens.json",
+            "auth-token.yaml",
         ):
             with self.subTest(rel=rel):
                 self.assertEqual(
