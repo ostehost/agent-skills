@@ -61,7 +61,9 @@ SENSITIVE_PATH_PARTS = {
 }
 TRACKED_SENSITIVE_PATH_PARTS = SENSITIVE_PATH_PARTS - {"private"}
 TRACKED_CREDENTIAL_DIR_PATTERN = re.compile(
-    r"^(secret|secrets|credential|credentials|service[-_]?account|private[-_]?key|api[-_]?key|token|tokens)$",
+    r"^(?:.*[._-])?"
+    r"(secret|secrets|credential|credentials|service[-_]?account|private[-_]?key|api[-_]?key|token|tokens)"
+    r"(?:[._-].*)?$",
     re.IGNORECASE,
 )
 SENSITIVE_NAME_PATTERNS = [
@@ -832,9 +834,11 @@ def unified_diff_content(patch: str) -> str:
     in_hunk = False
     for line in patch.splitlines():
         if line.startswith("@@"):
+            content.append(";")
             in_hunk = True
             continue
         if line.startswith("diff --git "):
+            content.append(";")
             in_hunk = False
             continue
         if in_hunk and line[:1] in {"+", "-", " "}:

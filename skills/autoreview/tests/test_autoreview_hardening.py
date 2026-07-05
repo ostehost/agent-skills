@@ -150,6 +150,8 @@ class AutoreviewHardeningTests(unittest.TestCase):
             "google-service-account.json",
             "client-secret.yaml",
             "credentials/prod.json",
+            "prod-credentials/client.conf",
+            "client-secrets/account.ini",
         ):
             with self.subTest(rel=rel):
                 self.assertIsNotNone(
@@ -170,6 +172,20 @@ class AutoreviewHardeningTests(unittest.TestCase):
         )
 
         self.assertTrue(
+            self.helper["secret_text_risk"](
+                self.helper["unified_diff_content"](patch)
+            )
+        )
+
+    def test_normalized_secret_scan_does_not_cross_hunks(self) -> None:
+        patch = (
+            "@@ -1 +1 @@\n"
+            "+password:\n"
+            "@@ -20 +20 @@\n"
+            '+"ordinary long string"\n'
+        )
+
+        self.assertFalse(
             self.helper["secret_text_risk"](
                 self.helper["unified_diff_content"](patch)
             )
