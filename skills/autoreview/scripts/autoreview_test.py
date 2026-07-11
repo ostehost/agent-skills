@@ -178,54 +178,12 @@ class AutoreviewCompatibilityTests(unittest.TestCase):
         args = argparse.Namespace(codex_config=['model_provider="private-value"'])
         self.assertEqual(AUTOREVIEW.codex_config_keys(args), ["model_provider"])
 
-    def test_codex_retries_terra_after_sol_access_failure(self) -> None:
+    def test_codex_runs_single_model_without_fallback_retry(self) -> None:
         args = argparse.Namespace(
             codex_bin="codex",
             codex_config=None,
             codex_speed=None,
-            fallback_model="gpt-5.6-terra",
-            model="gpt-5.6-sol",
-            stream_engine_output=False,
-            thinking="high",
-            tools=True,
-            web_search=False,
-        )
-        models: list[str] = []
-
-        def fake_run(command: list[str], *_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
-            model = command[command.index("--model") + 1]
-            models.append(model)
-            if model == "gpt-5.6-sol":
-                return subprocess.CompletedProcess(
-                    command,
-                    1,
-                    "",
-                    "The model `gpt-5.6-sol` does not exist or you do not have access to it.",
-                )
-            output_path = Path(command[command.index("--output-last-message") + 1])
-            output_path.write_text(json.dumps(FINAL_REPORT))
-            return subprocess.CompletedProcess(command, 0, "", "")
-
-        with tempfile.TemporaryDirectory(prefix="autoreview-codex-fallback.") as tmpdir, mock.patch.object(
-            AUTOREVIEW,
-            "resolve_command",
-            return_value="/usr/bin/codex",
-        ), mock.patch.object(AUTOREVIEW, "codex_auth_config_flags", return_value=[]), mock.patch.object(
-            AUTOREVIEW,
-            "run_with_heartbeat",
-            side_effect=fake_run,
-        ):
-            output = AUTOREVIEW.run_codex(args, Path(tmpdir), "review")
-
-        self.assertEqual(json.loads(output), FINAL_REPORT)
-        self.assertEqual(models, ["gpt-5.6-sol", "gpt-5.6-terra"])
-
-    def test_codex_does_not_fallback_after_unrelated_failure(self) -> None:
-        args = argparse.Namespace(
-            codex_bin="codex",
-            codex_config=None,
-            codex_speed=None,
-            fallback_model="gpt-5.6-terra",
+            fallback_model=None,
             model="gpt-5.6-sol",
             stream_engine_output=False,
             thinking="high",
@@ -236,9 +194,14 @@ class AutoreviewCompatibilityTests(unittest.TestCase):
 
         def fake_run(command: list[str], *_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
             models.append(command[command.index("--model") + 1])
-            return subprocess.CompletedProcess(command, 1, "", "network timeout")
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                "",
+                "The model `gpt-5.6-sol` does not exist or you do not have access to it.",
+            )
 
-        with tempfile.TemporaryDirectory(prefix="autoreview-codex-fallback.") as tmpdir, mock.patch.object(
+        with tempfile.TemporaryDirectory(prefix="autoreview-codex-single.") as tmpdir, mock.patch.object(
             AUTOREVIEW,
             "resolve_command",
             return_value="/usr/bin/codex",
@@ -247,7 +210,7 @@ class AutoreviewCompatibilityTests(unittest.TestCase):
             "run_with_heartbeat",
             side_effect=fake_run,
         ):
-            with self.assertRaisesRegex(SystemExit, "network timeout"):
+            with self.assertRaisesRegex(SystemExit, "codex engine failed"):
                 AUTOREVIEW.run_codex(args, Path(tmpdir), "review")
 
         self.assertEqual(models, ["gpt-5.6-sol"])
