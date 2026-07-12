@@ -1,6 +1,8 @@
 ---
 name: crabbox
 description: "Run OpenClaw remote validation on Linux, macOS, Windows, or WSL2 via the Crabbox or Testbox wrapper, including delegated Blacksmith proof. Report the actual provider and lease id."
+metadata:
+  version: "2026-05-27"
 ---
 
 # Crabbox
@@ -76,11 +78,19 @@ node scripts/crabbox-wrapper.mjs run --help | sed -n '1,80p'
   toolchain/build error. Do not claim Crabbox proof from a stale PATH shim.
 - OpenClaw scripts prefer `../crabbox/bin/crabbox` when present. The user PATH
   shim can be stale.
-- Check `.crabbox.yaml` for direct-provider defaults. Omitting `--provider`
-  means brokered AWS today.
+- Check `.crabbox.yaml` for the provider default. In OpenClaw, omitting
+  `--provider` means Blacksmith Testbox through Crabbox today; pass
+  `--provider aws` for direct brokered AWS runs.
 - For broad OpenClaw maintainer `pnpm` gates, prefer the repo wrapper with
   `--provider blacksmith-testbox` or the repo Testbox helpers when the standing
   Testbox policy applies.
+- Cold Testbox acquisition and hydration often take tens of seconds. When broad
+  remote proof is likely, immediately start
+  `node scripts/crabbox-wrapper.mjs warmup --provider blacksmith-testbox --keep --timing-json`
+  in a background command session while inspecting, editing, and running
+  focused local tests. Poll later, reuse the returned `tbx_...` with
+  `--provider blacksmith-testbox --id <tbx_id>`, and stop it before handoff.
+  Do not warm speculatively when remote proof is unlikely.
 - Always report the actual provider and id. `cbx_...` means AWS Crabbox;
   `tbx_...` means Blacksmith Testbox through Crabbox. If the output only says
   `blacksmith testbox list`, use `blacksmith testbox list --all` before

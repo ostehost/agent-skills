@@ -7,15 +7,18 @@ Shared skills for coding agents that work on OpenClaw projects.
 This repo is the public canonical source for common workflows such as review
 closeout and remote validation. The goal is simple: write a workflow once,
 reuse it everywhere, and avoid hand-copying long `SKILL.md` files across every
-repo.
+repo. See [VISION.md](VISION.md) for catalog boundaries and admission principles.
 
 ## Included Skills
 
 - `agent-transcript`: local-only, redacted PR/issue transcript provenance.
 - `autoreview`: structured closeout/code-review workflow plus helper script.
+- `behavior-validator`: source-blind validation of user-visible behavior against
+  a contract.
 - `crabbox`: Crabbox/Testbox remote validation workflow for broad or CI-parity
   proof.
-- `design-competition`: frontend generator-evaluator harness with Playwright or Human review.
+- `design-competition`: frontend generator-evaluator harness with Playwright or
+  human review.
 - `handoff`: path-free prompt handoff workflow for delegating a task to another
   agent.
 - `session-viewer`: local searchable HTML viewer for agent session JSONL.
@@ -136,6 +139,9 @@ skills/
   autoreview/
     SKILL.md
     scripts/
+  behavior-validator/
+    SKILL.md
+    references/
   crabbox/
     SKILL.md
   design-competition/
@@ -161,12 +167,23 @@ belong inside that skill's `scripts/` directory.
 Run this after edits:
 
 ```sh
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements-dev.txt
 scripts/validate-skills
-ruby -c scripts/install-skills && ruby -c scripts/validate-skills
-ruby scripts/install-skills.test.rb && ruby scripts/validate-skills.test.rb
+python3 -m py_compile scripts/install-skills scripts/install-skills.test.py scripts/validate-skills scripts/validate-skills.test.py
+python3 scripts/install-skills.test.py
+python3 scripts/validate-skills.test.py
 bash -n skills/autoreview/scripts/test-review-harness
-python3 -m py_compile skills/autoreview/scripts/autoreview skills/autoreview/scripts/test-review-harness.py
-python3 skills/autoreview/scripts/autoreview.test.py
+python3 -m py_compile skills/autoreview/scripts/autoreview skills/autoreview/scripts/test-review-harness.py skills/autoreview/scripts/autoreview_test.py
+python3 skills/autoreview/scripts/autoreview --self-test-config-defaults
+python3 skills/autoreview/scripts/autoreview --self-test-fallback-scope
+python3 skills/autoreview/scripts/autoreview --self-test-engine-isolation
+python3 skills/autoreview/scripts/autoreview --self-test-json-array-parser
+python3 skills/autoreview/scripts/autoreview --self-test-opencode-jsonl-parser
+python3 skills/autoreview/scripts/autoreview --self-test-opencode-isolation
+python3 skills/autoreview/scripts/autoreview --self-test-cursor-jsonl-parser
+python3 -m unittest skills/autoreview/scripts/autoreview_test.py skills.autoreview.tests.test_autoreview_hardening
 node --check skills/agent-transcript/scripts/agent-transcript
 node --test skills/agent-transcript/scripts/agent-transcript.test.mjs skills/session-viewer/scripts/session-viewer.test.ts
 skills/design-competition/scripts/check-conformance.sh

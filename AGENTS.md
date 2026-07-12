@@ -20,11 +20,10 @@ Public shared skills for agent workflows.
 
 ## Architecture
 
-- Helper scripts are zero-dependency and directly runnable: no `package.json`,
-  lockfile, `node_modules`, or build/bundle step. They run straight from the
-  language runtime (`ruby`, `python3`, `node`; `.ts` via Node type-stripping).
-  Do not add a package manager, bundler, or third-party dependency — direct
-  symlink/copy installs are the point.
+- Helper scripts are directly runnable: no package manager, bundler, or build
+  step. They run straight from the language runtime (`python3`, `node`; `.ts`
+  via Node type-stripping). Repository validation uses the small Python
+  dependency set in `requirements-dev.txt`.
 - A skill may be a single self-contained script (`autoreview`,
   `agent-transcript`) or a small module tree
   (`session-viewer/scripts/{core,importers}`). Both are fine; reach for modules

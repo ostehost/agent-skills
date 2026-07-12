@@ -1,130 +1,140 @@
-#!/usr/bin/env ruby
-# frozen_string_literal: true
+#!/usr/bin/env python3
 
-require "json"
-require "set"
-require "yaml"
-require_relative "lib/skill_repo"
+from __future__ import annotations
 
-Encoding.default_external = Encoding::UTF_8
-Encoding.default_internal = Encoding::UTF_8
+import json
+import sys
+from pathlib import Path
 
-# Validate the repo's skill invariants:
-#   1. every skills/*/SKILL.md has well-formed YAML frontmatter (a mapping) with a
-#      non-empty name + description, and name matches the skill directory
-#   2. skills.sh.json is valid JSON of the expected shape and only references
-#      skills that exist on disk, with no skill listed more than once
-#
-# Ungrouped skills are allowed (skills.sh.json sets "notGrouped": "bottom"), so a
-# skill need not appear in the manifest; it just may not dangle or duplicate.
-#
-# Malformed input is the validator's whole reason to exist, so every bad shape
-# must produce a readable error line, never a raw backtrace or a silent pass.
+try:
+    import yaml
+except ModuleNotFoundError:
+    print(
+        "PyYAML is required; run: python3 -m pip install -r requirements-dev.txt",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
 
-def parse_frontmatter(text)
-  return [nil, "missing YAML frontmatter"] unless text.start_with?("---\n")
 
-  close = frontmatter_end(text)
-  return [nil, "unterminated YAML frontmatter"] unless close
+class NoAliasSafeLoader(yaml.SafeLoader):
+    def compose_node(self, parent: object, index: object) -> yaml.Node:
+        if self.check_event(yaml.AliasEvent):
+            event = self.get_event()
+            raise yaml.YAMLError(f"YAML aliases are not allowed: {event.anchor}")
+        return super().compose_node(parent, index)
 
-  data = YAML.safe_load(text[4...close], permitted_classes: [], aliases: false)
-  return [{}, nil] if data.nil?
-  return [nil, "frontmatter is not a mapping"] unless data.is_a?(Hash)
 
-  [data, nil]
-rescue Psych::Exception => e
-  [nil, "invalid YAML: #{e.message}"]
-end
+def load_frontmatter(text: str) -> tuple[dict[object, object] | None, str | None]:
+    if not text.startswith("---\n"):
+        return None, "missing YAML frontmatter"
 
-# Offset of the closing "---" delimiter, requiring it to occupy its own line so a
-# frontmatter value that merely starts with "---" does not truncate parsing early.
-def frontmatter_end(text)
-  offset = 4
-  while (idx = text.index("\n---", offset))
-    after = text[idx + 4]
-    return idx if after.nil? || after == "\n"
+    close = text.find("\n---", 4)
+    if close == -1:
+        return None, "unterminated YAML frontmatter"
 
-    offset = idx + 4
-  end
-  nil
-end
+    try:
+        data = yaml.load(text[4:close], Loader=NoAliasSafeLoader) or {}
+    except yaml.YAMLError as error:
+        return None, f"invalid YAML: {error}"
 
-def validate_skill(path, root)
-  rel = path.delete_prefix("#{root}/")
-  dir = File.basename(File.dirname(path))
-  data, err = parse_frontmatter(File.read(path))
-  return ["#{rel}: #{err}"] if err
+    if not isinstance(data, dict):
+        return None, "YAML frontmatter must be a mapping"
+    return data, None
 
-  name = data["name"]
-  description = data["description"]
-  named = name.is_a?(String) && !name.strip.empty?
-  errors = []
-  errors << "#{rel}: missing name" unless named
-  errors << "#{rel}: missing description" unless description.is_a?(String) && !description.strip.empty?
-  errors << "#{rel}: name #{name.inspect} does not match directory #{dir.inspect}" if named && name != dir
-  errors
-end
 
-def validate_manifest(path, available)
-  return [] unless File.exist?(path)
+def validate_manifest(path: Path, available: set[str]) -> list[str]:
+    if not path.exists():
+        return []
 
-  rel = File.basename(path)
-  data = JSON.parse(File.read(path))
-  return ["#{rel}: top-level value must be a JSON object"] unless data.is_a?(Hash)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        return [f"skills.sh.json: invalid JSON: {error}"]
 
-  groupings = data["groupings"]
-  return ["#{rel}: missing \"groupings\" array"] if groupings.nil?
-  return ["#{rel}: \"groupings\" must be an array"] unless groupings.is_a?(Array)
+    if not isinstance(data, dict):
+        return ["skills.sh.json: top-level value must be a JSON object"]
 
-  validate_groupings(rel, groupings, available)
-rescue JSON::ParserError => e
-  ["#{rel}: invalid JSON: #{e.message}"]
-end
+    groupings = data.get("groupings")
+    if groupings is None:
+        return ['skills.sh.json: missing "groupings" array']
+    if not isinstance(groupings, list):
+        return ['skills.sh.json: "groupings" must be an array']
 
-def validate_groupings(rel, groupings, available)
-  seen = Set.new
-  groupings.each_with_index.flat_map do |group, i|
-    unless group.is_a?(Hash)
-      next ["#{rel}: grouping ##{i + 1} must be an object"]
-    end
+    errors: list[str] = []
+    seen: set[str] = set()
+    for index, grouping in enumerate(groupings, start=1):
+        if not isinstance(grouping, dict):
+            errors.append(f"skills.sh.json: grouping #{index} must be an object")
+            continue
 
-    title = group["title"].is_a?(String) ? group["title"] : "##{i + 1}"
-    skills = group["skills"] || []
-    next ["#{rel}: grouping #{title.inspect} \"skills\" must be an array"] unless skills.is_a?(Array)
+        title = grouping.get("title")
+        label = title if isinstance(title, str) else f"#{index}"
+        skills = grouping.get("skills", [])
+        if not isinstance(skills, list):
+            errors.append(
+                f'skills.sh.json: grouping {label!r} "skills" must be an array'
+            )
+            continue
 
-    skills.flat_map { |name| check_manifest_skill(rel, title, name, available, seen) }
-  end
-end
+        for name in skills:
+            if not isinstance(name, str):
+                errors.append(
+                    f"skills.sh.json: grouping {label!r} has a non-string skill entry {name!r}"
+                )
+                continue
+            if name not in available:
+                errors.append(
+                    f"skills.sh.json: grouping {label!r} references unknown skill {name!r}"
+                )
+            if name in seen:
+                errors.append(f"skills.sh.json: skill {name!r} is listed more than once")
+            seen.add(name)
 
-def check_manifest_skill(rel, title, name, available, seen)
-  return ["#{rel}: grouping #{title.inspect} has a non-string skill entry #{name.inspect}"] unless name.is_a?(String)
+    return errors
 
-  errors = []
-  errors << "#{rel}: grouping #{title.inspect} references unknown skill #{name.inspect}" unless available.include?(name)
-  errors << "#{rel}: skill #{name.inspect} is listed more than once" unless seen.add?(name)
-  errors
-end
 
-root = SkillRepo.root
-available_names = SkillRepo.names(root)
+def main() -> int:
+    root = Path(__file__).resolve().parent.parent
+    skill_files = sorted((root / "skills").glob("*/SKILL.md"))
 
-if available_names.empty?
-  warn "No skills/*/SKILL.md files found."
-  exit 1
-end
+    if not skill_files:
+        print("No skills/*/SKILL.md files found.", file=sys.stderr)
+        return 1
 
-skill_files = available_names.map { |name| File.join(SkillRepo.skills_root(root), name, "SKILL.md") }
-available = available_names.to_set
-manifest = File.join(root, "skills.sh.json")
-manifest_present = File.exist?(manifest)
+    errors: list[str] = []
+    for path in skill_files:
+        rel = path.relative_to(root)
+        data, error = load_frontmatter(path.read_text(encoding="utf-8"))
+        if error is not None:
+            errors.append(f"{rel}: {error}")
+            continue
 
-errors = skill_files.flat_map { |path| validate_skill(path, root) }
-errors.concat(validate_manifest(manifest, available))
+        assert data is not None
+        name = data.get("name")
+        description = data.get("description")
+        valid_name = isinstance(name, str) and bool(name.strip())
+        if not valid_name:
+            errors.append(f"{rel}: missing name")
+        elif name != path.parent.name:
+            errors.append(
+                f"{rel}: name {name!r} does not match directory {path.parent.name!r}"
+            )
+        if not isinstance(description, str) or not description.strip():
+            errors.append(f"{rel}: missing description")
 
-if errors.any?
-  warn errors.join("\n")
-  exit 1
-end
+    available = {path.parent.name for path in skill_files}
+    manifest = root / "skills.sh.json"
+    errors.extend(validate_manifest(manifest, available))
 
-puts "validated #{skill_files.length} skills"
-puts "validated skills.sh.json against #{available.length} skills" if manifest_present
+    if errors:
+        print("\n".join(errors), file=sys.stderr)
+        return 1
+
+    print(f"validated {len(skill_files)} skills")
+    if manifest.exists():
+        print(f"validated skills.sh.json against {len(available)} skills")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -5,7 +5,7 @@
     {
       "title": "Review",
       "description": "Skills for code review closeout and remote validation.",
-      "skills": ["autoreview", "crabbox"]
+      "skills": ["autoreview", "behavior-validator", "crabbox"]
     },
     {
       "title": "Handoff",

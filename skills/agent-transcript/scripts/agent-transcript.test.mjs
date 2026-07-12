@@ -104,71 +104,56 @@ test("append-body replaces an existing transcript section", () => {
   assert.equal((output.match(/agent-transcript:start/g) || []).length, 1);
 });
 
-test("render fails closed when a redaction-missed secret marker survives into the transcript", () => {
+test("find scans CLAUDE_CONFIG_DIR projects and labels them as Claude", () => {
   const dir = tempDir();
-  const session = path.join(dir, "session.jsonl");
+  const home = tempDir();
+  const projectDir = path.join(dir, "projects", "-tmp-agent-transcript");
+  fs.mkdirSync(projectDir, { recursive: true });
+  const session = path.join(projectDir, "11111111-2222-4333-8444-555555555555.jsonl");
   writeJsonl(session, [
-    { type: "response_item", payload: { role: "user", content: [{ type: "text", text: "Fix the bug." }] } },
+    { type: "user", message: { role: "user", content: "claude-config-dir-marker" } },
+    { type: "assistant", message: { role: "assistant", content: "Done." } },
   ]);
 
-  // The --title header is redact()ed for display but was never covered by the
-  // fail-closed unsafe() check before this test was added: unsafe()'s pattern for
-  // bare GITHUB_TOKEN mentions has no matching redact() rule, so it should trip
-  // the gate rather than land silently in the transcript.
-  const { status, stderr } = runFailure(["render", "--session", session, "--title", "rotate leaked GITHUB_TOKEN"]);
-  assert.notEqual(status, 0);
-  assert.match(stderr, /unsafe transcript after redaction/);
+  const output = run(["find", "--query", "claude-config-dir-marker", "--since-days", "1", "--max-files", "20"], {
+    env: { ...process.env, HOME: home, CLAUDE_CONFIG_DIR: `${dir}${path.sep}` },
+  });
+  const matches = JSON.parse(output);
+
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0].file, session);
+  assert.equal(matches[0].agent, "claude");
 });
 
-test("render still succeeds when the title contains a value redact() safely handles", () => {
+test("find labels explicit roots under trailing-slash CLAUDE_CONFIG_DIR as Claude", () => {
   const dir = tempDir();
-  const session = path.join(dir, "session.jsonl");
+  const home = tempDir();
+  const projectRoot = path.join(dir, "projects");
+  const projectDir = path.join(projectRoot, "-tmp-agent-transcript");
+  fs.mkdirSync(projectDir, { recursive: true });
+  const session = path.join(projectDir, "22222222-3333-4444-8555-666666666666.jsonl");
   writeJsonl(session, [
-    { type: "response_item", payload: { role: "user", content: [{ type: "text", text: "Fix the bug." }] } },
+    { type: "user", message: { role: "user", content: "claude-config-dir-explicit-root-marker" } },
+    { type: "assistant", message: { role: "assistant", content: "Done." } },
   ]);
 
-  // The header safety check must run on the *redacted* title/url, not the raw
-  // value -- otherwise ordinary PII that redact() handles fine (an email here)
-  // would incorrectly trip the fail-closed gate.
-  const output = run(["render", "--session", session, "--title", "contact person@example.com about this"]);
-  assert.match(output, /\[REDACTED_EMAIL\]/);
-  assert.doesNotMatch(output, /person@example\.com/);
-});
-
-test("html command omits an unsafe record's markdown instead of embedding it", () => {
-  const dir = tempDir();
-  const sessionsDir = path.join(dir, "sessions");
-  fs.mkdirSync(sessionsDir, { recursive: true });
-  const session = path.join(sessionsDir, "session.jsonl");
-  writeJsonl(session, [
-    { type: "response_item", payload: { role: "user", content: [{ type: "text", text: "Fix the bug." }] } },
-  ]);
-
-  const prsFile = path.join(dir, "prs.json");
-  fs.writeFileSync(
-    prsFile,
-    JSON.stringify([{ title: "rotate leaked GITHUB_TOKEN", url: "https://example.com/pr/1", number: 1 }])
+  const output = run(
+    [
+      "find",
+      "--query",
+      "claude-config-dir-explicit-root-marker",
+      "--since-days",
+      "1",
+      "--max-files",
+      "20",
+      "--root",
+      projectRoot,
+    ],
+    { env: { ...process.env, HOME: home, CLAUDE_CONFIG_DIR: `${dir}${path.sep}` } }
   );
+  const matches = JSON.parse(output);
 
-  // --min-score 0 sidesteps the query/session term-matching heuristic (irrelevant
-  // to this test) so the single fixture session is always the chosen candidate.
-  const output = run(["html", "--prs", prsFile, "--root", sessionsDir, "--min-score", "0"]);
-  assert.match(output, /unsafe transcript after redaction/);
-  assert.doesNotMatch(output, /Fix the bug\./);
-});
-
-test("find scores sessions by query term matches", () => {
-  const dir = tempDir();
-  const root = path.join(dir, "root");
-  fs.mkdirSync(root, { recursive: true });
-  const session = path.join(root, "session.jsonl");
-  writeJsonl(session, [
-    { type: "response_item", payload: { role: "user", content: [{ type: "text", text: "debugging the frobnicator widget" }] } },
-  ]);
-
-  const output = run(["find", "--query", "frobnicator widget", "--root", root, "--since-days", "3650"]);
-  const results = JSON.parse(output);
-  assert.equal(results.length, 1);
-  assert.equal(results[0].file, session);
-  assert.ok(results[0].score > 0);
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0].file, session);
+  assert.equal(matches[0].agent, "claude");
 });

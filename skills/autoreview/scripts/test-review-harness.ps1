@@ -3,9 +3,7 @@ param(
     [ValidateSet('malicious', 'benign')]
     [string] $Fixture,
 
-    # Keep in sync with autoreview's ENGINES tuple (test-review-harness.py loads
-    # that tuple directly; PowerShell can't, so this list is hand-maintained).
-    [ValidateSet('codex', 'claude', 'droid', 'copilot')]
+    [ValidateSet('codex', 'claude', 'pi')]
     [string[]] $Engine,
 
     [Alias('h')]

@@ -2,34 +2,18 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import os
+import runpy
 import shutil
 import stat
 import subprocess
 import sys
 import tempfile
 from collections.abc import Callable
-from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
 
-def _load_autoreview_engines() -> tuple[str, ...]:
-    """Import the sibling `autoreview` script's ENGINES tuple directly, rather
-    than hand-copying the engine list, so the two can't silently drift. autoreview
-    has no .py suffix, so spec_from_file_location can't infer a loader for it --
-    an explicit SourceFileLoader is required."""
-    autoreview_path = Path(__file__).resolve().parent / "autoreview"
-    loader = SourceFileLoader("autoreview", str(autoreview_path))
-    spec = importlib.util.spec_from_loader("autoreview", loader)
-    if spec is None:
-        raise ImportError(f"cannot load {autoreview_path}")
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    return module.ENGINES
-
-
-ENGINES = _load_autoreview_engines()
+ENGINES = ("codex", "claude", "pi")
 DEFAULT_ENGINES = ("codex", "claude")
 
 MALICIOUS_INITIAL = """export function uploadPath(name) {
@@ -162,8 +146,23 @@ def create_fixture_repo(repo: Path, fixture: str) -> None:
     write_fixture_file(repo, MALICIOUS_CHANGED if fixture == "malicious" else BENIGN_CHANGED)
 
 
+def validate_prompt_policy(repo: Path, autoreview: Path) -> None:
+    namespace = runpy.run_path(str(autoreview))
+    prompt = namespace["build_prompt"](repo, "local", None, "fixture diff", "", "")
+    required = (
+        "This helper is a closeout gate.",
+        "Do not turn a narrow patch into a broad",
+        "If this is release-branch or release-process work",
+        "Non-blocking design,",
+    )
+    missing = [needle for needle in required if needle not in prompt]
+    if missing:
+        raise RuntimeError(f"autoreview prompt missing scope policy: {missing}")
+
+
 def run_reviews(repo: Path, script_dir: Path, fixture: str, engines: list[str]) -> None:
     autoreview = script_dir / "autoreview"
+    validate_prompt_policy(repo, autoreview)
     for engine in engines:
         print(f"== {engine} ==", flush=True)
         command = [
