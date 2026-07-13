@@ -35,6 +35,9 @@ def git(repo: Path, *args: str) -> str:
             "GIT_AUTHOR_EMAIL": "autoreview@example.invalid",
             "GIT_COMMITTER_NAME": "Autoreview Test",
             "GIT_COMMITTER_EMAIL": "autoreview@example.invalid",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_SYSTEM": os.devnull,
         }
     )
     result = subprocess.run(
@@ -60,6 +63,24 @@ def init_repo(tempdir: Path) -> Path:
 
 def realistic_secret_value() -> str:
     return "A7f9K2m4Q8v6" + "N3x5R1p0T9z8"
+
+
+def usable_java() -> str | None:
+    java = shutil.which("java")
+    if java is None:
+        return None
+    result = subprocess.run(
+        [java, "-version"],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0 and "Unable to locate a Java Runtime" in result.stderr:
+        return None
+    return java
 
 
 class AutoreviewHardeningTests(unittest.TestCase):
@@ -2971,7 +2992,7 @@ class AutoreviewHardeningTests(unittest.TestCase):
                 os.environ.update(old)
 
     def test_parallel_test_environment_isolates_jvm_user_home(self) -> None:
-        java = shutil.which("java")
+        java = usable_java()
         if java is None:
             self.skipTest("java is not installed")
         with tempfile.TemporaryDirectory() as tempdir:
@@ -3023,7 +3044,7 @@ class AutoreviewHardeningTests(unittest.TestCase):
         )
 
     def test_java_tool_option_quote_round_trips_special_paths(self) -> None:
-        java = shutil.which("java")
+        java = usable_java()
         if java is None:
             self.skipTest("java is not installed")
         names = ["space home", "apostrophe's home"]

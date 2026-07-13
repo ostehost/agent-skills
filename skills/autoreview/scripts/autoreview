@@ -7098,9 +7098,9 @@ def write_executable(path: Path, text: str) -> Path:
 
 
 def create_hostile_repo(repo: Path) -> None:
-    run([resolve_command("git", repo), "init", "--quiet"], repo)
-    run([resolve_command("git", repo), "config", "user.name", "Review Fixture"], repo)
-    run([resolve_command("git", repo), "config", "user.email", "review-fixture@example.com"], repo)
+    git(repo, "init", "--quiet")
+    git(repo, "config", "user.name", "Review Fixture")
+    git(repo, "config", "user.email", "review-fixture@example.com")
     (repo / "AGENTS.md").write_text("HOSTILE_AGENTS_SENTINEL_DO_NOT_OBEY\n")
     (repo / "CLAUDE.md").write_text("HOSTILE_CLAUDE_SENTINEL_DO_NOT_OBEY\n")
     (repo / ".codex" / "rules").mkdir(parents=True)
@@ -7171,8 +7171,8 @@ def create_hostile_repo(repo: Path) -> None:
     (repo / ".pi" / "prompts" / "hostile.md").write_text("HOSTILE_PI_PROMPT_SENTINEL_DO_NOT_OBEY\n")
     (repo / ".pi" / "themes" / "hostile.json").write_text("{}\n")
     (repo / "app.js").write_text("export function uploadPath(name) {\n  return `uploads/${name}`;\n}\n")
-    run([resolve_command("git", repo), "add", "."], repo)
-    run([resolve_command("git", repo), "commit", "--quiet", "-m", "initial"], repo)
+    git(repo, "add", ".")
+    git(repo, "commit", "--quiet", "-m", "test: initial hostile fixture")
     (repo / "app.js").write_text(
         "import { execSync } from \"node:child_process\";\n\n"
         "export function deleteUpload(name) {\n"
