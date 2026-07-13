@@ -28,7 +28,7 @@ def load_frontmatter(text: str) -> tuple[dict[object, object] | None, str | None
     if not text.startswith("---\n"):
         return None, "missing YAML frontmatter"
 
-    close = text.find("\n---", 4)
+    close = frontmatter_end(text)
     if close == -1:
         return None, "unterminated YAML frontmatter"
 
@@ -40,6 +40,17 @@ def load_frontmatter(text: str) -> tuple[dict[object, object] | None, str | None
     if not isinstance(data, dict):
         return None, "YAML frontmatter must be a mapping"
     return data, None
+
+
+def frontmatter_end(text: str) -> int:
+    """Return the offset of a closing delimiter that occupies its own line."""
+    offset = 4
+    while (close := text.find("\n---", offset)) != -1:
+        after = close + 4
+        if after == len(text) or text[after] == "\n":
+            return close
+        offset = after
+    return -1
 
 
 def validate_manifest(path: Path, available: set[str]) -> list[str]:

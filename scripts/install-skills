@@ -58,9 +58,16 @@ def main(argv: list[str] | None = None) -> int:
 
     root = Path(__file__).resolve().parent.parent
     skills_root = root / "skills"
+    if not skills_root.is_dir():
+        print("No skills/*/SKILL.md files found.", file=sys.stderr)
+        return 1
+
     available = sorted(
         path.name for path in skills_root.iterdir() if (path / "SKILL.md").is_file()
     )
+    if not available:
+        print("No skills/*/SKILL.md files found.", file=sys.stderr)
+        return 1
 
     if args.list:
         print("\n".join(available))

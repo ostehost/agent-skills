@@ -61,6 +61,19 @@ class ValidateSkillsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("unterminated YAML frontmatter", result.stderr)
 
+    def test_closing_delimiter_must_occupy_its_own_line(self) -> None:
+        result = self.run_validator(
+            {
+                "sample": (
+                    "---\nname: sample\ndescription: Example\n"
+                    "---suffix\n---\n# Sample\n"
+                )
+            }
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("invalid YAML", result.stderr)
+
     def test_invalid_yaml(self) -> None:
         result = self.run_validator(
             {"sample": '---\nname: [sample\ndescription: "Example"\n---\n'}

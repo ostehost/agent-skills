@@ -76,6 +76,25 @@ class InstallSkillsTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, "alpha\nzeta\n")
 
+    def test_missing_skills_directory_fails_readably(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self.make_repo(Path(tmp), ())
+            result = self.run_installer(repo, "--list")
+
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(result.stderr, "No skills/*/SKILL.md files found.\n")
+
+    def test_empty_skills_directory_fails_readably(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self.make_repo(Path(tmp), ())
+            (repo / "skills").mkdir()
+            result = self.run_installer(repo)
+
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(result.stderr, "No skills/*/SKILL.md files found.\n")
+
     def test_dry_run_does_not_create_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
