@@ -843,26 +843,49 @@ test("CLI writes a one-file HTML export", async () => {
 
 // Event ids become DOM `id=` attributes and the sidebar jumps by
 // getElementById (html.ts), so a collision silently scrolls to the wrong block.
-// Both parsers must keep them unique; the client hardcoded `-thinking` while its
-// tool_use/tool_result siblings already disambiguated with the event index.
+// Both parsers and both browser-only format branches must keep them unique.
 test("both parsers give every event a unique id when one record holds two thinking blocks", () => {
-  const record = JSON.stringify({
-    type: "assistant",
-    uuid: "e1",
-    message: {
-      role: "assistant",
-      content: [
-        { type: "thinking", thinking: "first thought" },
-        { type: "thinking", thinking: "second thought" },
-      ],
-    },
-  });
+  const fixtures = [
+    [
+      "Claude",
+      JSON.stringify({
+        type: "assistant",
+        uuid: "e1",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "first thought" },
+            { type: "thinking", thinking: "second thought" },
+          ],
+        },
+      }),
+    ],
+    [
+      "Pi/OpenClaw",
+      [
+        JSON.stringify({ type: "session", id: "openclaw-session" }),
+        JSON.stringify({
+          type: "message",
+          id: "m1",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "first thought" },
+              { type: "thinking", thinking: "second thought" },
+            ],
+          },
+        }),
+      ].join("\n"),
+    ],
+  ] as const;
   const { parseRaw } = extractClientParseRaw();
-  for (const [side, doc] of [["server", parse(record)], ["client", parseRaw(record, "fixture.jsonl")]] as const) {
-    const reasoning = doc.events.filter((event: any) => event.kind === "reasoning");
-    assert.equal(reasoning.length, 2, `${side} should emit both thinking blocks`);
-    const ids = doc.events.map((event: any) => event.id);
-    assert.equal(new Set(ids).size, ids.length, `${side} emitted duplicate event ids: ${ids.join(", ")}`);
+  for (const [format, record] of fixtures) {
+    for (const [side, doc] of [["server", parse(record)], ["client", parseRaw(record, "fixture.jsonl")]] as const) {
+      const reasoning = doc.events.filter((event: any) => event.kind === "reasoning");
+      assert.equal(reasoning.length, 2, `${format} ${side} should emit both thinking blocks`);
+      const ids = doc.events.map((event: any) => event.id);
+      assert.equal(new Set(ids).size, ids.length, `${format} ${side} emitted duplicate event ids: ${ids.join(", ")}`);
+    }
   }
 });
 

@@ -173,6 +173,33 @@ test("html omits unsafe record markdown instead of embedding it", () => {
   assert.doesNotMatch(output, /Fix the bug\./);
 });
 
+test("html scores equal headRefName and branch values only once", () => {
+  const dir = tempDir();
+  const sessionsDir = path.join(dir, "sessions");
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  const session = path.join(sessionsDir, "session.jsonl");
+  writeJsonl(session, [
+    { type: "response_item", payload: { role: "user", content: [{ type: "text", text: "branch-marker" }] } },
+  ]);
+  const prsFile = path.join(dir, "prs.json");
+  fs.writeFileSync(
+    prsFile,
+    JSON.stringify([
+      {
+        title: "x",
+        url: "https://example.invalid/pr/1",
+        number: 1,
+        headRefName: "branch-marker",
+        branch: "branch-marker",
+      },
+    ]),
+  );
+
+  const output = run(["html", "--prs", prsFile, "--root", sessionsDir, "--min-score", "5"]);
+  assert.match(output, /No local session match found\./);
+  assert.doesNotMatch(output, /branch-marker/);
+});
+
 test("find scans CLAUDE_CONFIG_DIR projects and labels them as Claude", () => {
   const dir = tempDir();
   const home = tempDir();
