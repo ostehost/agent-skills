@@ -166,9 +166,13 @@ belong inside that skill's `scripts/` directory.
 
 Run this after edits:
 
+Create the virtualenv outside this checkout. `autoreview` refuses to execute any
+interpreter or tool located inside the repository under review, so an in-tree
+`.venv` makes the `autoreview` self-tests below fail with `executable not found`.
+
 ```sh
-python3 -m venv .venv
-. .venv/bin/activate
+python3 -m venv ~/.venvs/agent-skills
+. ~/.venvs/agent-skills/bin/activate
 python -m pip install -r requirements-dev.txt
 scripts/validate-skills
 python3 -m py_compile scripts/install-skills scripts/install-skills.test.py scripts/validate-skills scripts/validate-skills.test.py
