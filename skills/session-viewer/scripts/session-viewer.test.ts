@@ -841,6 +841,31 @@ test("CLI writes a one-file HTML export", async () => {
   assert.equal(JSON.parse(payload).kind, "normalized");
 });
 
+// Event ids become DOM `id=` attributes and the sidebar jumps by
+// getElementById (html.ts), so a collision silently scrolls to the wrong block.
+// Both parsers must keep them unique; the client hardcoded `-thinking` while its
+// tool_use/tool_result siblings already disambiguated with the event index.
+test("both parsers give every event a unique id when one record holds two thinking blocks", () => {
+  const record = JSON.stringify({
+    type: "assistant",
+    uuid: "e1",
+    message: {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "first thought" },
+        { type: "thinking", thinking: "second thought" },
+      ],
+    },
+  });
+  const { parseRaw } = extractClientParseRaw();
+  for (const [side, doc] of [["server", parse(record)], ["client", parseRaw(record, "fixture.jsonl")]] as const) {
+    const reasoning = doc.events.filter((event: any) => event.kind === "reasoning");
+    assert.equal(reasoning.length, 2, `${side} should emit both thinking blocks`);
+    const ids = doc.events.map((event: any) => event.id);
+    assert.equal(new Set(ids).size, ids.length, `${side} emitted duplicate event ids: ${ids.join(", ")}`);
+  }
+});
+
 test("client-side raw parser excludes tool_result blocks from merged Claude message text", () => {
   const { parseRaw } = extractClientParseRaw();
   const doc = parseRaw(

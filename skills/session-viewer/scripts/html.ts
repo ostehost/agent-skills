@@ -820,7 +820,7 @@ function buildClientScript(): string {
         if (text || images.length) events.push({ id: "e" + record.line, kind: role === "system" ? "system" : "message", role, title: String(role), text, images: images.length ? images : undefined, timestamp: v.timestamp, raw: v });
         for (const block of Array.isArray(content) ? content : []) {
           if (!isObject(block)) continue;
-          if (block.type === "thinking" && (block.thinking ?? block.text ?? block.content)) events.push({ id: "e" + record.line + "-thinking", kind: "reasoning", title: "thinking", text: block.thinking ?? block.text ?? block.content, timestamp: v.timestamp, raw: block });
+          if (block.type === "thinking" && (block.thinking ?? block.text ?? block.content)) events.push({ id: "e" + record.line + "-thinking-" + events.length, kind: "reasoning", title: "thinking", text: block.thinking ?? block.text ?? block.content, timestamp: v.timestamp, raw: block });
           if (block.type === "tool_use") events.push({ id: "e" + record.line + "-tool-" + events.length, kind: "tool_call", title: "tool call: " + (block.name ?? "tool"), text: pretty(block.input), timestamp: v.timestamp, callId: block.id, toolName: block.name, status: "running", raw: block });
           if (block.type === "tool_result") {
             const images = imageBlocks(block.content);
