@@ -120,6 +120,35 @@ export function toolResultEvent(options: {
   };
 }
 
+// Returns null when a message carries neither text nor images, so callers can
+// drop it in one step. `kind` and `title` stay caller-supplied: each importer
+// decides system-ness differently (Claude never, Pi on "system", Codex on
+// "developer" or "system") and Codex alone suffixes the title with its phase.
+export function messageEvent(options: {
+  id: string;
+  kind: "message" | "system";
+  role: string;
+  title: string;
+  text: string;
+  images: SessionImage[];
+  timestamp?: string;
+  raw?: unknown;
+}): SessionEvent | null {
+  if (!options.text && options.images.length === 0) {
+    return null;
+  }
+  return {
+    id: options.id,
+    kind: options.kind,
+    role: options.role,
+    title: options.title,
+    text: options.text,
+    images: options.images.length ? options.images : undefined,
+    timestamp: options.timestamp,
+    raw: options.raw,
+  };
+}
+
 export function reasoningEvent(options: {
   id: string;
   title: string;

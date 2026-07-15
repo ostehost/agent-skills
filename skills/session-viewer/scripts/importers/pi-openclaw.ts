@@ -6,6 +6,7 @@ import {
   imageAttachmentsFromContent,
   isImageSource,
   isRecord,
+  messageEvent,
   pretty,
   reasoningEvent,
   resolveTitle,
@@ -193,29 +194,18 @@ function eventsFromMessage(record: JsonlRecord, entry: Record<string, unknown>):
     }
   }
 
-  const text = compactText(textParts);
-  if (text) {
-    events.unshift({
-      id: baseId,
-      kind: role === "system" ? "system" : "message",
-      role,
-      title: role,
-      text,
-      images: images.length ? images : undefined,
-      timestamp,
-      raw: entry,
-    });
-  } else if (images.length > 0) {
-    events.unshift({
-      id: baseId,
-      kind: role === "system" ? "system" : "message",
-      role,
-      title: role,
-      text: "",
-      images,
-      timestamp,
-      raw: entry,
-    });
+  const merged = messageEvent({
+    id: baseId,
+    kind: role === "system" ? "system" : "message",
+    role,
+    title: role,
+    text: compactText(textParts),
+    images,
+    timestamp,
+    raw: entry,
+  });
+  if (merged) {
+    events.unshift(merged);
   }
   return events;
 }

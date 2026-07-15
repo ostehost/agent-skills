@@ -3,6 +3,7 @@ import {
   firstText,
   imageAttachmentsFromContent,
   isRecord,
+  messageEvent,
   pretty,
   reasoningEvent,
   resolveTitle,
@@ -117,27 +118,17 @@ function parseContentBlocks(
     }
   }
 
-  const mergedText = compactText(textParts);
-  if (mergedText) {
-    events.unshift({
-      id: `${recordId}-text`,
-      kind: "message",
-      role: fallbackRole,
-      title: fallbackRole,
-      text: mergedText,
-      images: images.length ? images : undefined,
-      timestamp,
-    });
-  } else if (images.length > 0) {
-    events.unshift({
-      id: `${recordId}-text`,
-      kind: "message",
-      role: fallbackRole,
-      title: fallbackRole,
-      text: "",
-      images,
-      timestamp,
-    });
+  const merged = messageEvent({
+    id: `${recordId}-text`,
+    kind: "message",
+    role: fallbackRole,
+    title: fallbackRole,
+    text: compactText(textParts),
+    images,
+    timestamp,
+  });
+  if (merged) {
+    events.unshift(merged);
   }
   return events;
 }

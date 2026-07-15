@@ -4,6 +4,7 @@ import {
   firstText,
   imageAttachmentsFromContent,
   isRecord,
+  messageEvent,
   pretty,
   reasoningEvent,
   resolveTitle,
@@ -67,19 +68,16 @@ function eventFromResponseItem(
     const phase = stringValue(payload.phase);
     const images = imageAttachmentsFromContent(payload.content);
     const text = textFromContentBlocks(payload.content);
-    if (!text && images.length === 0) {
-      return null;
-    }
-    return {
+    return messageEvent({
       id,
       kind: role === "developer" || role === "system" ? "system" : "message",
       role,
       title: `${role}${phase ? ` [${phase}]` : ""}`,
       text,
-      images: images.length ? images : undefined,
+      images,
       timestamp: timestampOf(record),
       raw: payload,
-    };
+    });
   }
 
   if (type === "reasoning") {
