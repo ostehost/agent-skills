@@ -748,8 +748,18 @@ function recentFiles(files, maxFiles) {
     .map((entry) => entry.file);
 }
 
-function candidateFiles(roots, terms, sinceMs, options = {}) {
+function candidateFiles(roots, sinceMs, options = {}) {
   return recentFiles(roots.flatMap((root) => walkJsonl(root, sinceMs)), Number(options["max-files"] || 400));
+}
+
+// Whole URLs are re-appended so they score as one term as well as via their
+// whitespace-split pieces; scoreScanRecord does not dedupe, so a term listed
+// twice is deliberately weighted twice.
+function queryTerms(query) {
+  return query
+    .split(/\s+/)
+    .concat(query.match(/https?:\/\/\S+/g) || [])
+    .filter(Boolean);
 }
 
 function findSessions(options) {
@@ -757,11 +767,8 @@ function findSessions(options) {
   const sinceMs = Date.now() - sinceDays * 24 * 60 * 60 * 1000;
   const roots = asArray(options.root).length ? asArray(options.root) : defaultRoots();
   const query = String(options.query || "");
-  const terms = query
-    .split(/\s+/)
-    .concat(query.match(/https?:\/\/\S+/g) || [])
-    .filter(Boolean);
-  const files = candidateFiles(roots, terms, sinceMs, options);
+  const terms = queryTerms(query);
+  const files = candidateFiles(roots, sinceMs, options);
   const scanBytes = Number(options["scan-bytes"] || 60000);
   const results = files
     .map((file) => scoreScanRecord(sessionScanRecord(file, scanBytes), terms, options.cwd))
@@ -887,13 +894,10 @@ async function main() {
     const scanRecords = sessionScanRecords(args);
     const minScore = Number(args["min-score"] || 50);
     for (const pr of readPrs(args.prs)) {
-      const query = [pr.url, pr.number ? `#${pr.number}` : "", pr.number, pr.title, pr.headRefName, pr.headRefName || pr.branch]
+      const query = [pr.url, pr.number ? `#${pr.number}` : "", pr.number, pr.title, pr.headRefName || pr.branch]
         .filter(Boolean)
         .join(" ");
-      const terms = query
-        .split(/\s+/)
-        .concat(query.match(/https?:\/\/\S+/g) || [])
-        .filter(Boolean);
+      const terms = queryTerms(query);
       const [candidate] = scanRecords
         .map((record) => scoreScanRecord(record, terms, args.cwd))
         .filter((result) => result.score >= minScore)
