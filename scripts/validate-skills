@@ -44,10 +44,15 @@ def load_frontmatter(text: str) -> tuple[dict[object, object] | None, str | None
 
 def frontmatter_end(text: str) -> int:
     """Return the offset of a closing delimiter that occupies its own line."""
-    offset = 4
+    # Start at 3 so a delimiter on the line right after the opening (an empty
+    # frontmatter block) is still found; allow trailing whitespace on the
+    # delimiter line, as other frontmatter parsers do.
+    offset = 3
     while (close := text.find("\n---", offset)) != -1:
         after = close + 4
-        if after == len(text) or text[after] == "\n":
+        line_end = text.find("\n", after)
+        rest = text[after:] if line_end == -1 else text[after:line_end]
+        if not rest.strip():
             return close
         offset = after
     return -1
@@ -61,6 +66,8 @@ def validate_manifest(path: Path, available: set[str]) -> list[str]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as error:
         return [f"skills.sh.json: invalid JSON: {error}"]
+    except (OSError, UnicodeDecodeError) as error:
+        return [f"skills.sh.json: unreadable: {error}"]
 
     if not isinstance(data, dict):
         return ["skills.sh.json: top-level value must be a JSON object"]
@@ -115,7 +122,12 @@ def main() -> int:
     errors: list[str] = []
     for path in skill_files:
         rel = path.relative_to(root)
-        data, error = load_frontmatter(path.read_text(encoding="utf-8"))
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as error:
+            errors.append(f"{rel}: unreadable: {error}")
+            continue
+        data, error = load_frontmatter(text)
         if error is not None:
             errors.append(f"{rel}: {error}")
             continue

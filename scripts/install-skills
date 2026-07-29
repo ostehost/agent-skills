@@ -43,6 +43,15 @@ def same_real_path(left: Path, right: Path) -> bool:
         return False
 
 
+def target_is_source(source: Path, target: Path) -> bool:
+    # The target must never be the source entry itself. Resolve only the parent
+    # directories: resolving the leaf would let a symlinked source dir slip past
+    # (target symlink -> source real path), and removing it destroys the source.
+    if (target.parent.resolve() / target.name) == (source.parent.resolve() / source.name):
+        return True
+    return not target.is_symlink() and same_real_path(source, target)
+
+
 def remove_path(path: Path) -> None:
     if path.is_symlink() or path.is_file():
         path.unlink()
@@ -93,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"exists, skipping: {target}", file=sys.stderr)
                 continue
 
-            if not target.is_symlink() and same_real_path(source, target):
+            if target_is_source(source, target):
                 print(f"target is source, skipping: {target}", file=sys.stderr)
                 continue
 

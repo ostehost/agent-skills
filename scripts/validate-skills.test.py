@@ -74,6 +74,40 @@ class ValidateSkillsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("invalid YAML", result.stderr)
 
+    def test_empty_frontmatter_reports_missing_fields_not_unterminated(self) -> None:
+        result = self.run_validator({"sample": "---\n---\n# Sample\n"})
+
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("unterminated", result.stderr)
+        self.assertIn("missing name", result.stderr)
+        self.assertIn("missing description", result.stderr)
+
+    def test_closing_delimiter_allows_trailing_whitespace(self) -> None:
+        result = self.run_validator(
+            {"sample": '---\nname: sample\ndescription: "Example"\n--- \n# Sample\n'}
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_undecodable_skill_file_fails_readably(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            (repo / "scripts").mkdir(parents=True)
+            shutil.copy2(SCRIPT, repo / "scripts" / "validate-skills")
+            skill_dir = repo / "skills" / "sample"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_bytes(b"---\nname: \xff\xfe\n---\n")
+            result = subprocess.run(
+                [sys.executable, str(repo / "scripts" / "validate-skills")],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unreadable", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
     def test_invalid_yaml(self) -> None:
         result = self.run_validator(
             {"sample": '---\nname: [sample\ndescription: "Example"\n---\n'}

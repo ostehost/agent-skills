@@ -45,6 +45,28 @@ class InstallSkillsTest(unittest.TestCase):
             self.assertEqual(result.stdout, "")
             self.assertTrue((repo / "skills" / "sample" / "SKILL.md").exists())
 
+    def test_force_skips_symlinked_source_installed_onto_itself(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = self.make_repo(root)
+            real = root / "real-sample"
+            (repo / "skills" / "sample").rename(real)
+            try:
+                os.symlink(real, repo / "skills" / "sample", target_is_directory=True)
+            except OSError as error:
+                if os.name == "nt":
+                    self.skipTest(f"symlink creation unavailable: {error}")
+                raise
+
+            result = self.run_installer(
+                repo, "--target", str(repo / "skills"), "--force", "sample"
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("target is source, skipping", result.stderr)
+            self.assertTrue((repo / "skills" / "sample" / "SKILL.md").exists())
+            self.assertTrue((real / "SKILL.md").exists())
+
     def test_force_copy_replaces_existing_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
