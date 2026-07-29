@@ -21,28 +21,63 @@ function parse(text: string) {
 // re-implementation of session parsing (it can't import the TS importers
 // directly -- there's no bundler in this zero-dependency skill). That
 // duplication has drifted from the source of truth before; extract the actual
-// shipped client script and run its pure parseRaw/statusFromOutput helpers
+// shipped client script and run its pure helpers (parseRaw, highlight, ...)
 // directly (no DOM needed -- they're plain data transforms) so a future edit
 // to one side without the other fails a test instead of shipping silently.
-function extractClientParseRaw(): {
-  parseRaw: (text: string, name?: string) => { format: string; title: string; meta: object; events: any[] };
-  statusFromOutput: (output: unknown) => string;
+function extractClientScript(): {
+  parseRaw: (
+    text: string,
+    name?: string,
+  ) => { format: string; title: string; meta: Record<string, unknown>; events: any[]; warnings: string[] };
+  statusFromOutput: (output: unknown, exitCode?: number) => string;
+  customToolResultStatus: (raw: unknown, output: unknown) => string;
+  inferHomePath: (doc: unknown) => string;
+  highlight: (text: unknown) => string;
+  inlineMarkdown: (text: unknown) => string;
+  state: { query: string; homePath: string };
 } {
   const html = buildSessionViewerHtml(null, { embedMode: "blank" });
   const openMarker = "<script>\n(() => {\n";
   const openIndex = html.lastIndexOf(openMarker);
   assert.notEqual(openIndex, -1, "expected to find the client script in generated HTML");
   const bodyStart = openIndex + openMarker.length;
-  const boundaryMarker = "const indexEvent = (event) => {";
+  const boundaryMarker = "const render = () => {";
   const boundaryIndex = html.indexOf(boundaryMarker, bodyStart);
-  assert.notEqual(boundaryIndex, -1, "expected parseRaw to precede indexEvent in the client script");
+  assert.notEqual(boundaryIndex, -1, "expected the parse/render helpers to precede render in the client script");
   const snippet = html.slice(bodyStart, boundaryIndex);
   // Only `state`'s initializer touches a browser global before the boundary
-  // (localStorage.getItem, for the persisted theme/view-mode); parseRaw and its
-  // dependencies are otherwise plain data transforms with no DOM access.
+  // (localStorage.getItem, for the persisted theme/view-mode); the extracted
+  // helpers are otherwise plain data transforms with no DOM access.
   const sandbox: Record<string, unknown> = { localStorage: { getItem: () => null, setItem: () => {} } };
-  vm.runInNewContext(`${snippet}\nglobalThis.__snapshot = { parseRaw, statusFromOutput };`, sandbox);
-  return sandbox.__snapshot as ReturnType<typeof extractClientParseRaw>;
+  vm.runInNewContext(
+    `${snippet}\nglobalThis.__snapshot = { parseRaw, statusFromOutput, customToolResultStatus, inferHomePath, highlight, inlineMarkdown, state };`,
+    sandbox,
+  );
+  return sandbox.__snapshot as ReturnType<typeof extractClientScript>;
+}
+
+// The CLI merges parseJsonl warnings into the document (session-viewer.ts);
+// use the same pipeline when comparing warnings against the client parser.
+function parseWithJsonlWarnings(text: string) {
+  const { records, warnings } = parseJsonl(text);
+  const doc = parseSessionDocument(records, "fixture.jsonl");
+  doc.warnings.unshift(...warnings);
+  return doc;
+}
+
+// Server and client intentionally differ in event-id prefixes; parity tests
+// compare the rendered substance of each event instead. Array.from rebuilds
+// the array in the test realm -- vm-created arrays fail deepStrictEqual's
+// prototype check otherwise.
+function eventShape(doc: { events: any[] }) {
+  return Array.from(doc.events, (event) => ({
+    kind: event.kind,
+    role: event.role,
+    title: event.title,
+    text: event.text,
+    status: event.status,
+    timestamp: event.timestamp,
+  }));
 }
 
 test("basename returns the last non-empty path segment", () => {
@@ -878,7 +913,7 @@ test("both parsers give every event a unique id when one record holds two thinki
       ].join("\n"),
     ],
   ] as const;
-  const { parseRaw } = extractClientParseRaw();
+  const { parseRaw } = extractClientScript();
   for (const [format, record] of fixtures) {
     for (const [side, doc] of [["server", parse(record)], ["client", parseRaw(record, "fixture.jsonl")]] as const) {
       const reasoning = doc.events.filter((event: any) => event.kind === "reasoning");
@@ -890,7 +925,7 @@ test("both parsers give every event a unique id when one record holds two thinki
 });
 
 test("client-side raw parser excludes tool_result blocks from merged Claude message text", () => {
-  const { parseRaw } = extractClientParseRaw();
+  const { parseRaw } = extractClientScript();
   const doc = parseRaw(
     JSON.stringify({
       type: "user",
@@ -912,7 +947,7 @@ test("client-side raw parser excludes tool_result blocks from merged Claude mess
 });
 
 test("client-side raw parser derives Codex function_call_output status from the process exit code", () => {
-  const { parseRaw } = extractClientParseRaw();
+  const { parseRaw } = extractClientScript();
   const doc = parseRaw(
     [
       JSON.stringify({ type: "session_meta", payload: { id: "x" } }),
@@ -932,7 +967,7 @@ test("client-side raw parser derives Codex function_call_output status from the 
 });
 
 test("client-side raw parser reads reasoning summary text from either field name", () => {
-  const { parseRaw } = extractClientParseRaw();
+  const { parseRaw } = extractClientScript();
   const doc = parseRaw(
     [
       JSON.stringify({ type: "session_meta", payload: { id: "x" } }),
@@ -944,4 +979,250 @@ test("client-side raw parser reads reasoning summary text from either field name
   );
   const reasoning = doc.events.find((event: any) => event.kind === "reasoning");
   assert.equal(reasoning?.text, "design approach");
+});
+
+// --- Parity regressions: the client parseRaw must mirror the server importers. ---
+
+const abortMarkerText = [
+  "<turn_aborted>",
+  "The user interrupted the previous turn on purpose. Any running unified exec processes may still be running in the background.",
+  "</turn_aborted>",
+].join("\n");
+
+test("client codex branch mirrors server turn_context, event_msg, unknown items, roles, and abort dedup", () => {
+  const abortUser = JSON.stringify({
+    type: "response_item",
+    payload: { type: "message", role: "user", content: [{ type: "input_text", text: abortMarkerText }] },
+  });
+  const abortEvent = JSON.stringify({ type: "event_msg", payload: { type: "turn_aborted" } });
+  const text = [
+    JSON.stringify({ type: "session_meta", payload: { id: "codex-session" } }),
+    JSON.stringify({ type: "turn_context", payload: { cwd: "/tmp/x", model: "gpt-5" } }),
+    JSON.stringify({
+      type: "response_item",
+      payload: { type: "message", role: "user", content: [{ type: "input_text", text: "hello" }] },
+    }),
+    JSON.stringify({ type: "event_msg", payload: { type: "task_started" } }),
+    JSON.stringify({ type: "event_msg", payload: { type: "agent_message", message: "working on it" } }),
+    JSON.stringify({ type: "response_item", payload: { type: "ghost_item", data: "x" } }),
+    JSON.stringify({
+      type: "response_item",
+      payload: { type: "message", role: "system", content: [{ type: "input_text", text: "system note" }] },
+    }),
+    JSON.stringify({
+      type: "response_item",
+      payload: { type: "message", role: "developer", content: [{ type: "input_text", text: "dev note" }] },
+    }),
+    abortUser,
+    abortEvent,
+    abortUser,
+    abortEvent,
+    JSON.stringify({ type: "event_msg" }),
+    JSON.stringify({ type: "response_item", payload: "oops" }),
+  ].join("\n");
+  const server = parseWithJsonlWarnings(text);
+  const { parseRaw } = extractClientScript();
+  const client = parseRaw(text, "fixture.jsonl");
+  assert.equal(server.format, "codex");
+  assert.equal(client.format, "codex");
+  assert.deepEqual(eventShape(client as any), eventShape(server));
+  assert.deepEqual(Array.from(client.warnings), server.warnings);
+  assert.deepEqual(server.warnings, ["line 14: response_item without object payload"]);
+  const titles = server.events.map((event) => event.title);
+  assert.ok(titles.includes("turn context"));
+  assert.ok(titles.includes("event: agent_message"));
+  assert.ok(titles.includes("response item: ghost_item"));
+  assert.equal(server.events.filter((event) => event.title === "Turn aborted").length, 1);
+  assert.equal(client.events.filter((event: any) => event.title === "Turn aborted").length, 1);
+  const systemRoles = server.events.filter((event) => event.kind === "system").map((event) => event.role);
+  assert.deepEqual(systemRoles, [undefined, "system", "developer"]);
+});
+
+test("client claude branch mirrors server summary meta and top-level text fallback", () => {
+  const text = [
+    JSON.stringify({ type: "summary", summary: "Session about parsers" }),
+    JSON.stringify({
+      type: "user",
+      timestamp: "2026-05-25T10:00:00Z",
+      message: { role: "user", content: [{ type: "text", text: "hi" }] },
+    }),
+    JSON.stringify({ type: "system", timestamp: "2026-05-25T10:00:01Z", text: "top-level system note" }),
+    JSON.stringify({ type: "system", content: "string content system" }),
+  ].join("\n");
+  const server = parseWithJsonlWarnings(text);
+  const { parseRaw } = extractClientScript();
+  const client = parseRaw(text, "fixture.jsonl");
+  assert.equal(server.format, "claude");
+  assert.equal(client.format, "claude");
+  assert.equal(server.title, "Session about parsers");
+  assert.equal(client.title, "Session about parsers");
+  assert.deepEqual(eventShape(client as any), eventShape(server));
+  // Server-side kind regression: system records must not be labeled "message".
+  const systems = server.events.filter((event) => event.kind === "system").map((event) => event.text);
+  assert.deepEqual(systems, ["top-level system note", "string content system"]);
+});
+
+test("client pi branch mirrors server system kind, entry events, and timestamp fallbacks", () => {
+  const text = [
+    JSON.stringify({ type: "session", id: "openclaw-session", timestamp: "2026-01-01T00:00:00Z" }),
+    JSON.stringify({
+      type: "message",
+      id: "m1",
+      createdAt: "2026-01-02T00:00:00Z",
+      message: { role: "system", content: "sys prompt" },
+    }),
+    JSON.stringify({
+      type: "message",
+      id: "m2",
+      message: { role: "user", content: "hi", timestamp: 1767312000000 },
+    }),
+    JSON.stringify({ type: "custom", id: "x1", updatedAt: "2026-01-03T00:00:00Z", note: "hello" }),
+    JSON.stringify({ type: "label", id: "L1" }),
+  ].join("\n");
+  const server = parseWithJsonlWarnings(text);
+  const { parseRaw } = extractClientScript();
+  const client = parseRaw(text, "fixture.jsonl");
+  assert.equal(server.format, "pi-openclaw");
+  assert.equal(client.format, "pi-openclaw");
+  assert.deepEqual(eventShape(client as any), eventShape(server));
+  assert.deepEqual(
+    Array.from(client.events, (event: any) => event.id),
+    server.events.map((event) => event.id),
+  );
+  const shapes = eventShape(server);
+  assert.deepEqual(shapes.map((event) => [event.kind, event.title, event.timestamp]), [
+    ["system", "system", "2026-01-02T00:00:00Z"],
+    ["message", "user", new Date(1767312000000).toISOString()],
+    ["event", "entry: custom", "2026-01-03T00:00:00Z"],
+  ]);
+});
+
+test("client renders unknown-format rows and per-line parse warnings like the server", () => {
+  const text = ['{"note":"mystery"}', "[1,2]", "{oops"].join("\n");
+  const server = parseWithJsonlWarnings(text);
+  const { parseRaw } = extractClientScript();
+  const client = parseRaw(text, "fixture.jsonl");
+  assert.equal(server.format, "unknown");
+  assert.equal(client.format, "unknown");
+  assert.deepEqual(
+    Array.from(client.events, (event: any) => [event.id, event.kind, event.title, event.text]),
+    server.events.map((event) => [event.id, event.kind, event.title, event.text]),
+  );
+  assert.equal(server.events.length, 2);
+  assert.equal(server.events[0]?.title, "raw line 1");
+  assert.deepEqual(Array.from(client.warnings), server.warnings);
+  assert.equal(server.warnings.length, 2);
+  assert.match(server.warnings[0] ?? "", /^line 3: invalid JSON: /u);
+  assert.equal(server.warnings[1], "unknown session format; rendered raw JSONL rows");
+});
+
+test("codex tool-result statuses prefer structured exit codes and anchored/conservative markers", () => {
+  const text = [
+    JSON.stringify({ type: "session_meta", payload: { id: "codex-session" } }),
+    JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "function_call_output",
+        call_id: "c1",
+        output: JSON.stringify({
+          output: "the phrase Process exited with code 1 appears quoted here",
+          metadata: { exit_code: 0 },
+        }),
+      },
+    }),
+    JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "function_call_output",
+        call_id: "c2",
+        output: "Log says 'Process exited with code 1' earlier today, all fine",
+      },
+    }),
+    JSON.stringify({
+      type: "response_item",
+      payload: { type: "function_call_output", call_id: "c3", output: "Process exited with code 2\ndetails" },
+    }),
+    JSON.stringify({
+      type: "response_item",
+      payload: { type: "function_call_output", call_id: "c4", output: "tail output\nProcess exited with code 0" },
+    }),
+    JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "custom_tool_call_output",
+        call_id: "c5",
+        output: "Compiled successfully; zero error handling issues found",
+      },
+    }),
+    JSON.stringify({
+      type: "response_item",
+      payload: { type: "custom_tool_call_output", call_id: "c6", output: "Error: could not open file" },
+    }),
+    JSON.stringify({
+      type: "response_item",
+      payload: { type: "custom_tool_call_output", call_id: "c7", output: JSON.stringify({ error: "boom" }) },
+    }),
+  ].join("\n");
+  const expected: Record<string, string> = {
+    c1: "ok",
+    c2: "unknown",
+    c3: "error",
+    c4: "ok",
+    c5: "unknown",
+    c6: "error",
+    c7: "error",
+  };
+  const server = parse(text);
+  const { parseRaw } = extractClientScript();
+  const client = parseRaw(text, "fixture.jsonl");
+  for (const [side, doc] of [["server", server], ["client", client]] as const) {
+    for (const [callId, status] of Object.entries(expected)) {
+      const event = doc.events.find((item: any) => item.callId === callId);
+      assert.equal(event?.status, status, `${side} status for ${callId}`);
+    }
+  }
+});
+
+test("server keeps text from unknown content-block types like the client", () => {
+  const text = [
+    JSON.stringify({ type: "session_meta", payload: { id: "codex-session" } }),
+    JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "assistant",
+        content: [
+          { type: "output_text", text: "ok" },
+          { type: "refusal_text", text: "declined" },
+          { type: "future_text", input: "from-input" },
+        ],
+      },
+    }),
+  ].join("\n");
+  const server = parse(text);
+  const { parseRaw } = extractClientScript();
+  const client = parseRaw(text, "fixture.jsonl");
+  assert.equal(server.events.find((event) => event.kind === "message")?.text, "ok\n\ndeclined\n\nfrom-input");
+  assert.equal(client.events.find((event: any) => event.kind === "message")?.text, "ok\n\ndeclined\n\nfrom-input");
+});
+
+test("search highlighting never splits HTML entities", () => {
+  const { highlight, inlineMarkdown, state } = extractClientScript();
+  state.query = "amp";
+  assert.equal(highlight("amplifier & speaker"), "<mark>amp</mark>lifier &amp; speaker");
+  assert.equal(inlineMarkdown("amplifier & speaker"), "<mark>amp</mark>lifier &amp; speaker");
+  state.query = "quot";
+  assert.equal(highlight('a "quoted" word'), "a &quot;<mark>quot</mark>ed&quot; word");
+  state.query = "lt.";
+  assert.equal(highlight("result: a < b. lt. done"), "result: a &lt; b. <mark>lt.</mark> done");
+  state.query = "gt;";
+  assert.equal(highlight("x > y"), "x &gt; y");
+  state.query = "";
+});
+
+test("inferHomePath does not cross whitespace when matching home directories", () => {
+  const { inferHomePath } = extractClientScript();
+  assert.equal(inferHomePath({ meta: {}, events: [{ text: "check /Users/bob and stuff" }] }), "/Users/bob");
+  assert.equal(inferHomePath({ meta: {}, events: [{ text: "cwd is /home/worker/repo today" }] }), "/home/worker");
+  assert.equal(inferHomePath({ meta: { cwd: "/Users/alice/projects/app" }, events: [] }), "/Users/alice");
 });

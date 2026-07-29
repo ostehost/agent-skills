@@ -122,7 +122,7 @@ export function toolResultEvent(options: {
 
 // Returns null when a message carries neither text nor images, so callers can
 // drop it in one step. `kind` and `title` stay caller-supplied: each importer
-// decides system-ness differently (Claude never, Pi on "system", Codex on
+// decides system-ness differently (Claude and Pi on "system", Codex on
 // "developer" or "system") and Codex alone suffixes the title with its phase.
 export function messageEvent(options: {
   id: string;
@@ -297,24 +297,17 @@ export function textFromContentBlocks(content: unknown): string {
     if (!isRecord(block)) {
       continue;
     }
-    const type = stringValue(block.type);
+    // Accept any block carrying a string text-like field: unknown block types
+    // (e.g. a future "refusal_text") must not silently drop their text, and the
+    // client-side raw parser already renders them. Image blocks never reach the
+    // text path -- their payloads live in data/url fields, none of which are
+    // text-like keys.
     const text =
       stringValue(block.text) ??
       stringValue(block.content) ??
       stringValue(block.output) ??
       stringValue(block.input);
-    if (
-      text &&
-      (!type ||
-        [
-          "input_text",
-          "output_text",
-          "text",
-          "thinking",
-          "tool_result",
-          "function_call_output",
-        ].includes(type))
-    ) {
+    if (text) {
       const cleaned = cleanImageMarkerText(text, hasImages);
       if (cleaned) {
         parts.push(cleaned);

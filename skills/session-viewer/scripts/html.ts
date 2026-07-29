@@ -591,7 +591,7 @@ function buildClientScript(): string {
       ...(doc?.events ?? []).slice(0, 200).map((event) => event.text),
     ];
     for (const candidate of candidates) {
-      const match = String(candidate ?? "").match(/(\\/Users\\/[^/]+|\\/home\\/[^/]+)(?=\\/|$)/u);
+      const match = String(candidate ?? "").match(/(\\/Users\\/[^/\\s]+|\\/home\\/[^/\\s]+)(?=[\\s/]|$)/u);
       if (match) return match[1];
     }
     return "";
@@ -606,6 +606,7 @@ function buildClientScript(): string {
   };
   const compact = (parts) => parts.map((p) => String(p ?? "").trim()).filter(Boolean).join("\\n\\n");
   const isObject = (v) => v && typeof v === "object" && !Array.isArray(v);
+  const str = (value) => typeof value === "string" && value.trim() ? value : undefined;
   const isImageSource = (value) => {
     const trimmed = String(value ?? "").trim();
     if (/^(data:image\\/|https?:\\/\\/|file:\\/\\/|\\/\\/|\\/(?!\\/)|\\.{1,2}\\/)/iu.test(trimmed)) return true;
@@ -697,13 +698,31 @@ function buildClientScript(): string {
     return compact(content.map((block) => {
       if (typeof block === "string") return cleanImageMarkerText(block, hasImages);
       if (!isObject(block)) return "";
-      return cleanImageMarkerText(block.text ?? block.content ?? block.output ?? "", hasImages);
+      const str = (value) => typeof value === "string" ? value : undefined;
+      return cleanImageMarkerText(str(block.text) ?? str(block.content) ?? str(block.output) ?? str(block.input) ?? "", hasImages);
     }));
   };
-  const statusFromOutput = (output) => {
-    const match = /Process exited with code\\s+(-?\\d+)/u.exec(String(output ?? ""));
+  const parsedOutputRecord = (raw) => {
+    let value = raw;
+    if (typeof value === "string") { try { value = JSON.parse(value); } catch { return undefined; } }
+    return isObject(value) ? value : undefined;
+  };
+  const exitCodeFromOutput = (raw) => {
+    const value = parsedOutputRecord(raw);
+    const code = value && isObject(value.metadata) ? value.metadata.exit_code : undefined;
+    return typeof code === "number" ? code : undefined;
+  };
+  const statusFromOutput = (output, exitCode) => {
+    if (typeof exitCode === "number") return exitCode === 0 ? "ok" : "error";
+    const text = String(output ?? "");
+    const match = /^Process exited with code\\s+(-?\\d+)\\b/u.exec(text) ?? /(?:^|\\n)\\s*Process exited with code\\s+(-?\\d+)\\s*$/u.exec(text);
     if (!match) return "unknown";
     return match[1] === "0" ? "ok" : "error";
+  };
+  const customToolResultStatus = (raw, output) => {
+    const value = parsedOutputRecord(raw);
+    if (value && value.error !== undefined && value.error !== null) return "error";
+    return /^error\\b/iu.test(String(output ?? "").trim()) ? "error" : "unknown";
   };
   const isTurnAbortedText = (text) => {
     const trimmed = String(text ?? "").trim();
@@ -740,11 +759,19 @@ function buildClientScript(): string {
     }
     return result;
   };
-  const parseJsonl = (text) => text.split(/\\r?\\n/u).map((line, index) => ({ line: index + 1, raw: line.trim() })).filter((row) => row.raw).map((row) => {
-    try { return { line: row.line, value: JSON.parse(row.raw) }; }
-    catch (error) { return { line: row.line, value: { type: "parse_error", error: String(error), raw: row.raw } }; }
-  });
+  const parseJsonl = (text) => {
+    const records = [];
+    const warnings = [];
+    text.split(/\\r?\\n/u).forEach((raw, index) => {
+      const line = raw.trim();
+      if (!line) return;
+      try { records.push({ line: index + 1, value: JSON.parse(line) }); }
+      catch (error) { warnings.push("line " + (index + 1) + ": invalid JSON: " + (error instanceof Error ? error.message : String(error))); }
+    });
+    return { records, warnings };
+  };
   const ts = (record) => isObject(record.value) && typeof record.value.timestamp === "string" ? record.value.timestamp : undefined;
+  const piTs = (entry, message) => str(entry.timestamp) ?? str(entry.createdAt) ?? str(entry.updatedAt) ?? (typeof message?.timestamp === "number" ? new Date(message.timestamp).toISOString() : undefined);
   const detect = (records) => {
     if (records.some((r) => isObject(r.value) && (r.value.type === "session_meta" || r.value.type === "response_item"))) return "codex";
     if (records.some((r) => isObject(r.value) && (r.value.type === "session" || (r.value.type === "message" && isObject(r.value.message))))) return "pi-openclaw";
@@ -752,31 +779,53 @@ function buildClientScript(): string {
     return "unknown";
   };
   const parseRaw = (text, name = "session") => {
-    const records = parseJsonl(text);
+    const { records, warnings } = parseJsonl(text);
     const format = detect(records);
     const events = [];
     const meta = {};
+    if (format === "unknown") {
+      for (const record of records) {
+        events.push({ id: "raw-" + record.line, kind: "event", title: "raw line " + record.line, text: JSON.stringify(record.value, null, 2), raw: record.value });
+      }
+      warnings.push("unknown session format; rendered raw JSONL rows");
+      return { format, title: name, meta, events, warnings };
+    }
     for (const record of records) {
       const v = record.value;
       if (!isObject(v)) continue;
       if (format === "codex") {
         if (v.type === "session_meta" && isObject(v.payload)) Object.assign(meta, v.payload);
+        if (v.type === "turn_context") {
+          const p = isObject(v.payload) ? v.payload : undefined;
+          events.push({ id: "e" + record.line, kind: "system", title: "turn context", text: pretty(p ?? v), timestamp: ts(record), raw: v });
+          continue;
+        }
         if (v.type === "event_msg") {
-          const p = isObject(v.payload) ? v.payload : {};
-          if (p.type === "turn_aborted" && events.at(-1)?.title !== "Turn aborted") {
+          const p = isObject(v.payload) ? v.payload : undefined;
+          if (!p) continue;
+          const type = str(p.type) ?? "event";
+          if (type === "task_started" || type === "task_complete") continue;
+          if (type === "turn_aborted") {
             const previous = events.at(-1);
             if (previous?.kind === "message" && previous.role === "user" && isTurnAbortedText(previous.text)) events.pop();
-            events.push(turnAbortedEvent("e" + record.line, ts(record), p));
+            if (events.at(-1)?.title !== "Turn aborted") events.push(turnAbortedEvent("e" + record.line, ts(record), p));
+            continue;
           }
+          events.push({ id: "e" + record.line, kind: "event", title: "event: " + type, text: str(p.message) ?? str(p.text) ?? pretty(p), timestamp: ts(record), raw: p });
           continue;
         }
         if (v.type !== "response_item") continue;
-        const p = isObject(v.payload) ? v.payload : {};
-        const type = p.type;
+        if (!isObject(v.payload)) {
+          warnings.push("line " + record.line + ": response_item without object payload");
+          continue;
+        }
+        const p = v.payload;
+        const type = str(p.type);
+        if (!type) continue;
         if (type === "message") {
           const images = imageBlocks(p.content);
           const text = textBlocks(p.content);
-          if (text || images.length) events.push({ id: "e" + record.line, kind: p.role === "developer" ? "system" : "message", role: p.role, title: String(p.role ?? "message"), text, images: images.length ? images : undefined, timestamp: ts(record), raw: p });
+          if (text || images.length) events.push({ id: "e" + record.line, kind: p.role === "developer" || p.role === "system" ? "system" : "message", role: p.role, title: String(p.role ?? "message"), text, images: images.length ? images : undefined, timestamp: ts(record), raw: p });
         } else if (type === "reasoning") {
           const text = compact([Array.isArray(p.summary) ? compact(p.summary.map((s) => s?.text ?? s?.summary)) : "", textBlocks(p.content)]);
           if (text) events.push({ id: "e" + record.line, kind: "reasoning", title: "reasoning", text, timestamp: ts(record), raw: p });
@@ -784,39 +833,54 @@ function buildClientScript(): string {
           events.push({ id: "e" + record.line, kind: "tool_call", title: "tool call: " + (p.name ?? type), text: pretty(p.arguments ?? p.input ?? p), timestamp: ts(record), callId: p.call_id, toolName: p.name, status: "running", raw: p });
         } else if (type === "function_call_output") {
           const output = pretty(p.output);
-          events.push({ id: "e" + record.line, kind: "tool_result", title: "tool result" + (p.call_id ? ": " + p.call_id : ""), text: output, timestamp: ts(record), callId: p.call_id, status: statusFromOutput(output), raw: p });
+          events.push({ id: "e" + record.line, kind: "tool_result", title: "tool result" + (p.call_id ? ": " + p.call_id : ""), text: output, timestamp: ts(record), callId: p.call_id, status: statusFromOutput(output, exitCodeFromOutput(p.output)), raw: p });
         } else if (type === "custom_tool_call_output") {
           const output = pretty(p.output);
-          events.push({ id: "e" + record.line, kind: "tool_result", title: "tool result" + (p.call_id ? ": " + p.call_id : ""), text: output, timestamp: ts(record), callId: p.call_id, status: output.toLowerCase().includes("error") ? "error" : "unknown", raw: p });
+          events.push({ id: "e" + record.line, kind: "tool_result", title: "tool result" + (p.call_id ? ": " + p.call_id : ""), text: output, timestamp: ts(record), callId: p.call_id, status: customToolResultStatus(p.output, output), raw: p });
+        } else {
+          events.push({ id: "e" + record.line, kind: "event", title: "response item: " + type, text: pretty(p), timestamp: ts(record), raw: p });
         }
         continue;
       }
       if (format === "pi-openclaw") {
-        if (v.type === "session") Object.assign(meta, v);
-        if (v.type !== "message" || !isObject(v.message)) continue;
-        const m = v.message;
-        if (m.role === "toolResult") {
-          const images = [...imageBlocks(m.content), ...mediaImages(m)];
-          events.push({ id: String(v.id ?? "e" + record.line), kind: "tool_result", title: "tool result" + (m.toolCallId ? ": " + m.toolCallId : ""), text: textBlocks(m.content) || (images.length ? "" : pretty(m)), images: images.length ? images : undefined, timestamp: v.timestamp, callId: m.toolCallId, toolName: m.toolName, status: m.isError ? "error" : "ok", raw: v });
-        } else {
-          const messageContent = Array.isArray(m.content) ? m.content.filter((block) => !(isObject(block) && block.type === "thinking")) : m.content;
-          const images = [...imageBlocks(m.content), ...mediaImages(m)];
-          const text = textBlocks(messageContent);
-          if (text || images.length) events.push({ id: String(v.id ?? "e" + record.line), kind: "message", role: m.role, title: String(m.role ?? "message"), text, images: images.length ? images : undefined, timestamp: v.timestamp, raw: v });
-          for (const block of Array.isArray(m.content) ? m.content : []) {
-            if (isObject(block) && block.type === "thinking" && (block.thinking ?? block.text)) events.push({ id: String(v.id ?? "e" + record.line) + "-thinking-" + events.length, kind: "reasoning", title: "thinking", text: block.thinking ?? block.text, timestamp: v.timestamp, raw: block });
-            if (isObject(block) && block.type === "toolCall") events.push({ id: String(v.id ?? "e" + record.line) + "-tool-" + events.length, kind: "tool_call", title: "tool call: " + (block.name ?? "tool"), text: pretty(block.arguments ?? block.input), timestamp: v.timestamp, callId: block.id, toolName: block.name, status: "running", raw: block });
+        if (v.type === "session") { Object.assign(meta, v); continue; }
+        if (v.type === "message") {
+          if (!isObject(v.message)) continue;
+          const m = v.message;
+          const timestamp = piTs(v, m);
+          if (m.role === "toolResult") {
+            const images = [...imageBlocks(m.content), ...mediaImages(m)];
+            events.push({ id: String(v.id ?? "e" + record.line), kind: "tool_result", title: "tool result" + (m.toolCallId ? ": " + m.toolCallId : ""), text: textBlocks(m.content) || (images.length ? "" : pretty(m)), images: images.length ? images : undefined, timestamp, callId: m.toolCallId, toolName: m.toolName, status: m.isError ? "error" : "ok", raw: v });
+          } else {
+            const messageContent = Array.isArray(m.content) ? m.content.filter((block) => !(isObject(block) && block.type === "thinking")) : m.content;
+            const images = [...imageBlocks(m.content), ...mediaImages(m)];
+            const text = textBlocks(messageContent);
+            if (text || images.length) events.push({ id: String(v.id ?? "e" + record.line), kind: m.role === "system" ? "system" : "message", role: m.role, title: String(m.role ?? "message"), text, images: images.length ? images : undefined, timestamp, raw: v });
+            for (const block of Array.isArray(m.content) ? m.content : []) {
+              if (isObject(block) && block.type === "thinking" && (block.thinking ?? block.text)) events.push({ id: String(v.id ?? "e" + record.line) + "-thinking-" + events.length, kind: "reasoning", title: "thinking", text: block.thinking ?? block.text, timestamp, raw: block });
+              if (isObject(block) && block.type === "toolCall") events.push({ id: String(v.id ?? "e" + record.line) + "-tool-" + events.length, kind: "tool_call", title: "tool call: " + (block.name ?? "tool"), text: pretty(block.arguments ?? block.input), timestamp, callId: block.id, toolName: block.name, status: "running", raw: block });
+            }
           }
+          continue;
         }
+        if (v.type === "label") continue;
+        const entryType = str(v.type);
+        events.push({ id: String(v.id ?? "e" + record.line), kind: "event", title: entryType ? "entry: " + entryType : "entry", text: pretty(v), timestamp: piTs(v), raw: v });
         continue;
       }
       if (format === "claude") {
+        if (v.type === "summary") {
+          const summary = str(v.summary) ?? str(v.text);
+          if (summary) meta.summary = summary;
+          continue;
+        }
         const m = isObject(v.message) ? v.message : v;
         const role = m.role ?? v.type ?? "message";
         const content = m.content;
         const images = imageBlocks(content);
         const messageContent = Array.isArray(content) ? content.filter((block) => !(isObject(block) && ["thinking", "tool_use", "tool_result"].includes(block.type))) : content;
         const text = textBlocks(messageContent);
+        const emitted = events.length;
         if (text || images.length) events.push({ id: "e" + record.line, kind: role === "system" ? "system" : "message", role, title: String(role), text, images: images.length ? images : undefined, timestamp: v.timestamp, raw: v });
         for (const block of Array.isArray(content) ? content : []) {
           if (!isObject(block)) continue;
@@ -827,9 +891,14 @@ function buildClientScript(): string {
             events.push({ id: "e" + record.line + "-result-" + events.length, kind: "tool_result", title: "tool result" + (block.tool_use_id ? ": " + block.tool_use_id : ""), text: textBlocks(block.content) || (images.length ? "" : pretty(block.content)), images: images.length ? images : undefined, timestamp: v.timestamp, callId: block.tool_use_id, status: block.is_error ? "error" : "ok", raw: block });
           }
         }
+        if (events.length === emitted) {
+          const fallback = str(v.text) ?? str(v.content);
+          if (fallback) events.push({ id: "e" + record.line, kind: role === "system" ? "system" : "message", role, title: String(role), text: fallback, timestamp: v.timestamp, raw: v });
+        }
       }
     }
-    return { format, title: meta.id || meta.summary || name, meta, events: expandMemoryCitations(events), warnings: [] };
+    if (!events.length) warnings.push(format === "codex" ? "no Codex message events found" : format === "pi-openclaw" ? "no Pi/OpenClaw message events found" : "no Claude message events found");
+    return { format, title: meta.id || meta.summary || name, meta, events: expandMemoryCitations(events), warnings };
   };
   const indexEvent = (event) => {
     const imageText = Array.isArray(event.images) ? event.images.map((image) => [image.alt, image.detail, image.src].join(" ")).join("\\n") : "";
@@ -907,14 +976,22 @@ function buildClientScript(): string {
     flush();
     return state.query ? items.filter(itemMatches) : items;
   };
+  const queryRegex = () => new RegExp(state.query
+    .replace(/[.*+?^$()|[\\]\\\\]/g, "\\\\$&")
+    .replaceAll("{", "\\\\{")
+    .replaceAll("}", "\\\\}"), "gi");
+  // Match on the unescaped text and escape per-segment, so a query like "amp"
+  // can never split an HTML entity ("&amp;") produced by escaping.
   const highlight = (text) => {
-    const escaped = escapeHtml(shortenHomePaths(text));
-    if (!state.query || state.query.length < 3) return escaped;
-    const q = state.query
-      .replace(/[.*+?^$()|[\\]\\\\]/g, "\\\\$&")
-      .replaceAll("{", "\\\\{")
-      .replaceAll("}", "\\\\}");
-    return escaped.replace(new RegExp(q, "gi"), (m) => "<mark>" + m + "</mark>");
+    const source = shortenHomePaths(text);
+    if (!state.query || state.query.length < 3) return escapeHtml(source);
+    let out = "";
+    let last = 0;
+    for (const match of source.matchAll(queryRegex())) {
+      out += escapeHtml(source.slice(last, match.index)) + "<mark>" + escapeHtml(match[0]) + "</mark>";
+      last = match.index + match[0].length;
+    }
+    return out + escapeHtml(source.slice(last));
   };
   const inlineMarkdown = (text) => {
     const tick = String.fromCharCode(96);
@@ -936,13 +1013,12 @@ function buildClientScript(): string {
     html = html.replace(/(^|\\s)_([^_\\n]+)_(?=\\s|$)/gu, "$1<em>$2</em>");
     html = html.replace(/\\u0000(\\d+)\\u0000/gu, (_, index) => placeholders[Number(index)] ?? "");
     if (state.query && state.query.length >= 3) {
-      const q = state.query
-        .replace(/[.*+?^$()|[\\]\\\\]/g, "\\\\$&")
-        .replaceAll("{", "\\\\{")
-        .replaceAll("}", "\\\\}");
-      html = html.replace(/(<[^>]+>|[^<]+)/gu, (segment) => {
-        if (segment.startsWith("<")) return segment;
-        return segment.replace(new RegExp(q, "gi"), (m) => "<mark>" + m + "</mark>");
+      const re = queryRegex();
+      // Tags and HTML entities are atomic segments the query can never match
+      // inside; only plain-text runs between them get highlighted.
+      html = html.replace(/(<[^>]+>|&[a-z]+;)|[^<&]+|[<&]/giu, (segment, atomic) => {
+        if (atomic) return segment;
+        return segment.replace(re, (m) => "<mark>" + m + "</mark>");
       });
     }
     return html;

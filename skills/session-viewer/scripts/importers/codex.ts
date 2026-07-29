@@ -25,12 +25,52 @@ function timestampOf(record: JsonlRecord): string | undefined {
   return isRecord(record.value) ? stringValue(record.value.timestamp) : undefined;
 }
 
-function statusFromOutput(output: string): "ok" | "error" | "unknown" {
-  const match = /Process exited with code\s+(-?\d+)/u.exec(output);
+function parsedOutputRecord(raw: unknown): Record<string, unknown> | undefined {
+  let value = raw;
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value) as unknown;
+    } catch {
+      return undefined;
+    }
+  }
+  return isRecord(value) ? value : undefined;
+}
+
+// Codex wraps exec output as JSON {"output": ..., "metadata": {"exit_code": N}};
+// the structured exit code is authoritative when present.
+function exitCodeFromOutput(raw: unknown): number | undefined {
+  const value = parsedOutputRecord(raw);
+  const metadata = value && isRecord(value.metadata) ? value.metadata : undefined;
+  const code = metadata?.exit_code;
+  return typeof code === "number" ? code : undefined;
+}
+
+// Without a structured exit code, "Process exited with code N" only counts when
+// it opens or closes the output -- a quoted mention inside a cat'd log must not
+// recolor the status.
+function statusFromOutput(output: string, exitCode?: number): "ok" | "error" | "unknown" {
+  if (typeof exitCode === "number") {
+    return exitCode === 0 ? "ok" : "error";
+  }
+  const match =
+    /^Process exited with code\s+(-?\d+)\b/u.exec(output) ??
+    /(?:^|\n)\s*Process exited with code\s+(-?\d+)\s*$/u.exec(output);
   if (!match) {
     return "unknown";
   }
   return match[1] === "0" ? "ok" : "error";
+}
+
+// Conservative error detection for custom tool outputs: only a structured
+// {error: ...} payload or a leading "Error"/"error:" marks failure; a success
+// output that merely mentions "error" stays unknown.
+function customToolResultStatus(raw: unknown, output: string): "error" | "unknown" {
+  const value = parsedOutputRecord(raw);
+  if (value && value.error !== undefined && value.error !== null) {
+    return "error";
+  }
+  return /^error\b/iu.test(output.trim()) ? "error" : "unknown";
 }
 
 function isTurnAbortedText(text: string): boolean {
@@ -120,7 +160,7 @@ function eventFromResponseItem(
       text: output,
       timestamp: timestampOf(record),
       callId,
-      status: statusFromOutput(output),
+      status: statusFromOutput(output, exitCodeFromOutput(payload.output)),
       raw: payload,
     });
   }
@@ -150,7 +190,7 @@ function eventFromResponseItem(
       text: output,
       timestamp: timestampOf(record),
       callId,
-      status: output.toLowerCase().includes("error") ? "error" : "unknown",
+      status: customToolResultStatus(payload.output, output),
       raw: payload,
     });
   }

@@ -24,12 +24,15 @@ function parseContentBlocks(
   timestamp: string | undefined,
   fallbackRole: string,
 ): SessionEvent[] {
+  // System records (e.g. {"type":"system","content":...}) must keep kind
+  // "system" like the text-field fallback and the client-side raw parser do.
+  const messageKind: "message" | "system" = fallbackRole === "system" ? "system" : "message";
   if (typeof content === "string") {
     return content.trim()
       ? [
           {
             id: recordId,
-            kind: "message",
+            kind: messageKind,
             role: fallbackRole,
             title: fallbackRole,
             text: content.trim(),
@@ -120,7 +123,7 @@ function parseContentBlocks(
 
   const merged = messageEvent({
     id: `${recordId}-text`,
-    kind: "message",
+    kind: messageKind,
     role: fallbackRole,
     title: fallbackRole,
     text: compactText(textParts),
