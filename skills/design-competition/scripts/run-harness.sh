@@ -9,6 +9,14 @@ MAX_ROUNDS="${MAX_ROUNDS:-12}"    # range 5-15 [V]; ceiling >15 unverified
 MAX_BUDGET_USD="${MAX_BUDGET_USD:-25}"
 PORT="${PORT:-4173}"
 CID="${CID:-main}"
+
+# --- model-id guard FIRST (M1 model-id locking): fail fast before any filesystem
+# scaffolding, so an aborted launch leaves no dead runs/<id>/ skeleton behind.
+: "${GENERATOR_MODEL:?set GENERATOR_MODEL (e.g. claude-opus-5) — M1 model-id locking, recorded in RUN_MANIFEST.json}"
+if [ "$MODE" = "auto" ]; then
+  : "${EVALUATOR_MODEL:?set EVALUATOR_MODEL — invariant 8 + M1: multimodal, family MUST differ from GENERATOR_MODEL}"
+fi
+
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$(git -C "$PROJECT" rev-parse --short HEAD)-001"
 RUN="$PROJECT/runs/$RUN_ID"
 CAND="$RUN/candidates/$CID"
@@ -32,14 +40,9 @@ write_manifest(){
 mkdir -p "$PROJECT/.claude/agents"
 cp "$SKILL_DIR/.claude/agents/"*.md "$PROJECT/.claude/agents/"
 
-# --- materialize agent model ids (the shipped files carry REPLACE_WITH_* placeholders:
-# M1 model-id locking means every run must CHOOSE its models explicitly, so the wrapper
-# fails fast rather than letting a placeholder reach the API as a model id). sed edits
-# the INSTALLED copies only — the skill's own files keep their placeholders.
-: "${GENERATOR_MODEL:?set GENERATOR_MODEL (e.g. claude-opus-5) — M1 model-id locking, recorded in RUN_MANIFEST.json}"
-if [ "$MODE" = "auto" ]; then
-  : "${EVALUATOR_MODEL:?set EVALUATOR_MODEL — invariant 8 + M1: multimodal, family MUST differ from GENERATOR_MODEL}"
-fi
+# --- materialize agent model ids (the shipped files carry REPLACE_WITH_* placeholders;
+# the guard at the top proved the env ids are real). sed edits the INSTALLED copies
+# only — the skill's own files keep their placeholders.
 sed -i.bak "s/REPLACE_WITH_GENERATOR_MODEL_ID/$GENERATOR_MODEL/" "$PROJECT/.claude/agents/generator.md"
 sed -i.bak "s/REPLACE_WITH_SUPERVISOR_MODEL_ID/${SUPERVISOR_MODEL:-$GENERATOR_MODEL}/" "$PROJECT/.claude/agents/supervisor.md"
 if [ -n "${EVALUATOR_MODEL:-}" ]; then
