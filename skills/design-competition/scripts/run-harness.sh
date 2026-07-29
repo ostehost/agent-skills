@@ -25,6 +25,12 @@ SUPERVISE="${SUPERVISE:-0}"             # 1 = invoke the CRDAL supervisor after 
 : "${GENERATOR_MODEL:?set GENERATOR_MODEL (e.g. claude-opus-5) — M1 model-id locking, recorded in RUN_MANIFEST.json}"
 if [ "$MODE" = "auto" ]; then
   : "${EVALUATOR_MODEL:?set EVALUATOR_MODEL — invariant 8 + M1: multimodal, family MUST differ from GENERATOR_MODEL}"
+  if [ "$EVALUATOR_MODEL" = "$GENERATOR_MODEL" ]; then
+    # Cheapest enforceable slice of the family-must-differ rule (full family mapping
+    # stays the operator's job — an id string cannot prove the family differs).
+    echo "run-harness: EVALUATOR_MODEL must differ from GENERATOR_MODEL (self-preference bias, invariant 8; both '$GENERATOR_MODEL')" >&2
+    exit 2
+  fi
 fi
 
 # --- claim a unique run dir atomically (same-second relaunch at the same HEAD
@@ -44,8 +50,8 @@ mkdir -p "$CAND"
 cp "$SKILL_DIR/templates/NEXT_FINDINGS.json" "$RUN/NEXT_FINDINGS.json"
 echo 0 > "$RUN/budgets.json.spent"
 
-# --- RUN_MANIFEST.json (M1 provenance the agent contracts reference): written after
-# the model-id checks below prove the ids are real, before round 0 starts.
+# --- RUN_MANIFEST.json (M1 provenance the agent contracts reference): the model-id
+# guard above already vetted the ids; written once the agents are materialized, before round 0.
 write_manifest(){
   jq -n --arg run "$RUN_ID" --arg mode "$MODE" --arg gen "$GENERATOR_MODEL" \
     --arg ev "${EVALUATOR_MODEL:-human}" --arg sup "${SUPERVISOR_MODEL:-$GENERATOR_MODEL}" \
@@ -72,6 +78,15 @@ replace_in_file "$PROJECT/.claude/agents/supervisor.md" REPLACE_WITH_SUPERVISOR_
 if [ -n "${EVALUATOR_MODEL:-}" ]; then
   replace_in_file "$PROJECT/.claude/agents/evaluator.md" REPLACE_WITH_MULTIMODAL_MODEL_ID "$EVALUATOR_MODEL"
 fi
+# Fail fast if a placeholder survived (e.g. a renamed placeholder in a shipped agent
+# file): the CLI would otherwise be handed the literal REPLACE_WITH_* string as a
+# model id. Human mode legitimately leaves the evaluator placeholder in place.
+guarded=("$PROJECT/.claude/agents/generator.md" "$PROJECT/.claude/agents/supervisor.md")
+[ "$MODE" = "auto" ] && guarded+=("$PROJECT/.claude/agents/evaluator.md")
+if grep -l 'REPLACE_WITH_' "${guarded[@]}"; then
+  echo "run-harness: unreplaced model-id placeholder in the installed agent file(s) above" >&2
+  exit 2
+fi
 write_manifest
 
 log(){ printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >> "$RUN/events.log"; }
@@ -95,10 +110,17 @@ SERVER_PID=""
 cleanup(){ [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null || true; }
 trap cleanup EXIT
 
+commit_all(){ # $1=message. The per-round/stop commits are authoritative (X1'); an
+  # empty tree (e.g. the target project gitignores runs/) is not a failure — only a
+  # real git error may claim work was left uncommitted.
+  if [ -z "$(git -C "$PROJECT" status --porcelain)" ]; then log "commit skipped: nothing to commit ($1)"; return 0; fi
+  git -C "$PROJECT" add -A && git -C "$PROJECT" commit -q -m "$1" \
+    || log "commit FAILED — round work is UNCOMMITTED ($1)"
+}
+
 stop(){
   echo "$1" > "$RUN/STOP_REASON"; log "STOP $1"
-  git -C "$PROJECT" add -A && git -C "$PROJECT" commit -q -m "chore(harness): stop $1 ($RUN_ID)" \
-    || log "STOP commit FAILED — round work is UNCOMMITTED"
+  commit_all "chore(harness): stop $1 ($RUN_ID)"
   # A failed run must be distinguishable from a completed one by exit code.
   if [ "$1" = error ]; then exit 1; fi
   exit 0
@@ -185,6 +207,9 @@ for ((n=0; n<MAX_ROUNDS; n++)); do
     # filled sheet (or halts via the AGENT_STOP kill-file). A malformed sheet must fall
     # into the invalid-critique -> UNRENDERABLE fallback below, never kill the run.
     cp "$SKILL_DIR/templates/REVIEW-SHEET.md" "$RD/REVIEW-SHEET.md"
+    # pre-stamp the wrapper-known provenance so the human never hand-edits it
+    replace_in_file "$RD/REVIEW-SHEET.md" '"round": 0' "\"round\": $n"
+    replace_in_file "$RD/REVIEW-SHEET.md" '"candidate_id": "main"' "\"candidate_id\": \"$CID\""
     printf 'human seat: fill %s\n            save it as %s to continue (touch %s to halt)\n' \
       "$RD/REVIEW-SHEET.md" "$RD/REVIEW-SHEET.filled.md" "$RUN/AGENT_STOP"
     until [ -f "$RD/REVIEW-SHEET.filled.md" ] || [ -f "$RUN/AGENT_STOP" ]; do sleep 2; done
@@ -212,6 +237,10 @@ for ((n=0; n<MAX_ROUNDS; n++)); do
   # cannot award itself a PASS (see HARNESS §16-17).
   "$SKILL_DIR/scripts/recompute-gate.sh" "$OUT" "$SKILL_DIR/rubric.json" "$RD" > "$OUT.tmp" \
     && mv "$OUT.tmp" "$OUT" || { log "round $n recompute-gate failed"; stop error; }
+  # Wrapper-owned provenance: neither seat is told the round number, so candidate_id
+  # and round are stamped here, never trusted from the critique (keeps scores.csv true).
+  jq --arg cid "$CID" --argjson n "$n" '.candidate_id=$cid | .round=$n' "$OUT" > "$OUT.tmp" \
+    && mv "$OUT.tmp" "$OUT" || { log "round $n provenance stamp failed"; stop error; }
   "$SKILL_DIR/scripts/assert-evidence.sh" "$OUT" "$RD" "$PROJECT" || stop error   # evidence files must exist on disk
   # sidecar provenance (loop-blind): wrapper records seat + any auto-only stats here, never in $OUT
   jq -n --arg seat "$MODE" '{evaluator:{type:$seat}}' > "$AUDIT"
@@ -237,7 +266,7 @@ for ((n=0; n<MAX_ROUNDS; n++)); do
   fi
 
   # --- per-round commit (authoritative; Stop hook is only a crash backstop) ---
-  git -C "$PROJECT" add -A && git -C "$PROJECT" commit -q -m "chore(harness): round $n $VERDICT ($RUN_ID)" || log "round $n commit FAILED — round work is UNCOMMITTED"
+  commit_all "chore(harness): round $n $VERDICT ($RUN_ID)"
   # NOTE: PASS is recorded, NOT terminal. Loop continues to MAX_ROUNDS / budget / plateau (L7).
   plateaued && stop plateau
 done

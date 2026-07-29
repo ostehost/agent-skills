@@ -3,4 +3,5 @@
 # execute: sets SKILL_DIR to the skill root (parent of scripts/). Uses
 # ${BASH_SOURCE[0]} rather than $0 so it resolves correctly even if a caller is
 # ever sourced instead of exec'd.
+# shellcheck disable=SC2034  # consumed by every sourcing script, not here
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

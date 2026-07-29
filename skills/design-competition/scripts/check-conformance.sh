@@ -145,7 +145,7 @@ pass "C6 rubric encodes verified DIRECTION; numbers labeled unverified"
 [ -f "$P/templates/mcp.json" ] || die "C7 templates/mcp.json missing (pinned Playwright MCP server config)"
 jq -e '.mcpServers.playwright.args | any(test("@playwright/mcp@[0-9]"))' "$P/templates/mcp.json" >/dev/null \
   || die "C7 Playwright MCP server not version-pinned in templates/mcp.json"
-grep -q 'templates/mcp.json' "$S/run-harness.sh" \
+grep -q 'cp "$SKILL_DIR/templates/mcp.json"' "$S/run-harness.sh" \
   || die "C7 run-harness.sh never materializes templates/mcp.json into the round dir (--strict-mcp-config would fail)"
 pass "C7 auto seat startable: pinned Playwright MCP config shipped and copied by the loop"
 

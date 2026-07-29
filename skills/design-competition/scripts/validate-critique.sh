@@ -5,7 +5,9 @@
 # load-bearing parts of schemas/critique.schema.json: seat-blindness (no forbidden keys),
 # the four criteria, the 0.5 score grid in 1..5 (or null), and the verdict/severity enums.
 set -euo pipefail
-DOC="${1:?critique json}"; SCHEMA="${2:-}"   # SCHEMA arg accepted for ajv-compatible call shape; unused here
+DOC="${1:?critique json}"
+# shellcheck disable=SC2034  # SCHEMA accepted for ajv-compatible call shape; unused here
+SCHEMA="${2:-}"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 DIR="$SKILL_DIR"
 # NOTE: ajv against schemas/critique.schema.json is AUTHORITATIVE. This jq fallback enforces only the

@@ -67,6 +67,9 @@ check_failure "assert-evidence rejects tokens/ evidence missing from the project
 check_failure "run-harness rejects an unknown MODE before doing any work" \
   env MODE=playwright GENERATOR_MODEL=x "$DIR/run-harness.sh"
 
+check_failure "run-harness rejects EVALUATOR_MODEL identical to GENERATOR_MODEL" \
+  env MODE=auto GENERATOR_MODEL=same-model EVALUATOR_MODEL=same-model PROJECT="$TMP" "$DIR/run-harness.sh"
+
 # ---- recompute-gate.sh -------------------------------------------------------
 
 tampered="$TMP/tampered.json"
