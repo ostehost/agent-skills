@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Shared skill-root resolution for design-competition/scripts/*.sh. Source, don't
 # execute: sets SKILL_DIR to the skill root (parent of scripts/). Uses
 # ${BASH_SOURCE[0]} rather than $0 so it resolves correctly even if a caller is

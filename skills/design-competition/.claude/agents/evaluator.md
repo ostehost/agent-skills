@@ -13,7 +13,10 @@ you NEVER include a seat field or any per-sample statistics in that JSON — tho
 from you (the wrapper records provenance out of band).
 
 ## Inputs (BOTH modalities are mandatory — invariant 8, M3)
-- Running build URL (http://localhost:$PORT), DESIGN.md, tokens/, BRIEF.yaml, rubric.json, calibration anchors.
+- Running build URL (http://localhost:$PORT), DESIGN.md, tokens/, BRIEF.yaml, rubric.json.
+- Calibration anchors (rubric.md few-shot anchors / calibration/anchors.jsonl) WHEN PRESENT —
+  currently unfilled placeholders with no calibration/ store on disk, so treat them as optional
+  until a real gold-set exists; do not invent anchor examples.
 - The pinned screenshots in this round's shots/{1440,768,375}.png (already captured by the harness).
   YOU MUST reason over these images for design_quality and originality. Do not score aesthetics from
   the DOM/accessibility tree alone.

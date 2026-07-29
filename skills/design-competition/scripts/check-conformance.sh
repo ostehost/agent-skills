@@ -11,6 +11,11 @@
 #   C5  VIEWPORTS pinned to 1440/768/375 in both capture-shots.sh and the schema.
 #   C6  RUBRIC weight DIRECTION asserted (design+originality > craft+functionality) and numbers
 #       labeled unverified.
+#   C7  AUTO SEAT startable: a version-pinned Playwright MCP config ships in templates/mcp.json
+#       and run-harness.sh materializes it into the round dir before --strict-mcp-config reads it.
+#   C8  RUNNABLE preconditions wired: run-harness.sh installs the skill's .claude/agents into the
+#       target project, and the human seat renders templates/REVIEW-SHEET.md then blocks for the
+#       filled sheet instead of reading a file nobody wrote.
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 P="$SKILL_DIR"
@@ -124,5 +129,24 @@ fn=$(jq '.criteria[]|select(.id=="functionality").weight' "$P/rubric.json")
 awk -v a="$dq" -v b="$or" -v c="$cr" -v d="$fn" 'BEGIN{exit !((a+b)>(c+d))}' || die "C6 numeric weights violate the verified direction"
 jq -e '._unverified|test("UNVERIFIED")' "$P/rubric.json" >/dev/null || die "C6 rubric numbers not labeled unverified"
 pass "C6 rubric encodes verified DIRECTION; numbers labeled unverified"
+
+# ---- C7 auto-seat MCP config shipped + wired (RUN-1) ------------------------
+[ -f "$P/templates/mcp.json" ] || die "C7 templates/mcp.json missing (pinned Playwright MCP server config)"
+jq -e '.mcpServers.playwright.args | any(test("@playwright/mcp@[0-9]"))' "$P/templates/mcp.json" >/dev/null \
+  || die "C7 Playwright MCP server not version-pinned in templates/mcp.json"
+grep -q 'templates/mcp.json' "$S/run-harness.sh" \
+  || die "C7 run-harness.sh never materializes templates/mcp.json into the round dir (--strict-mcp-config would fail)"
+pass "C7 auto seat startable: pinned Playwright MCP config shipped and copied by the loop"
+
+# ---- C8 runnable preconditions wired (RUN-2 / RUN-3) ------------------------
+grep -q 'cp "$SKILL_DIR/.claude/agents/"' "$S/run-harness.sh" \
+  || die "C8 run-harness.sh does not install the skill's subagents into the target project"
+[ -f "$P/templates/REVIEW-SHEET.md" ] || die "C8 templates/REVIEW-SHEET.md missing (canonical human-seat form)"
+grep -q '^```json$' "$P/templates/REVIEW-SHEET.md" \
+  || die "C8 REVIEW-SHEET template lacks the fenced json block human-seat-to-json.sh extracts"
+if ! grep -q 'until \[ -f "$RD/REVIEW-SHEET.filled.md" \]' "$S/run-harness.sh"; then
+  die "C8 human mode does not render-and-block on the REVIEW-SHEET"
+fi
+pass "C8 runnable: agents installed into project; human seat renders the sheet and blocks for it"
 
 echo "ALL CONFORMANCE CHECKS PASSED"

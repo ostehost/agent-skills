@@ -198,13 +198,19 @@ scores are **non-monotonic**.
 ### L10 — Mode bindings  *(the only mode-specific wiring)* — [G10, solid]
 One generation surface (`frontend-design` plugin); swap the judge behind a **mode flag**; both write
 to a **shared feedback file the generator reads next pass**.
-- **Mode A (Auto/Playwright):** evaluator at `agents/evaluator.md` (no Write/Edit), invoked headless
+- **Mode A (Auto/Playwright):** evaluator at `.claude/agents/evaluator.md` (no Write/Edit; installed
+  into the target project's `.claude/agents/` by `scripts/run-harness.sh` at startup), invoked headless
   (`claude --agent evaluator -p "…"` → `PASS`/`NEEDS_WORK` + findings). **Playwright MCP is now a
-  first-party Microsoft tool** (`microsoft/playwright-mcp`, versioned — pin it; `--caps=vision` /
-  `--caps=devtools`), so wiring it is configuration, not a custom build — though it was still not
-  *shipped inside* `cwc-long-running-agents` (M5). Loop = bash `while` alternating generator/evaluator,
-  writing the gated critique to the `NEXT_FINDINGS.json` baton; gating via a `PreToolUse` read-gate +
-  control hooks (`kill-switch.sh`, `steer.sh`, `commit-on-stop.sh`).
+  first-party Microsoft tool** (`microsoft/playwright-mcp`, versioned — pinned in `templates/mcp.json`,
+  which the loop copies into each round dir; `--caps=vision` / `--caps=devtools`), so wiring it is
+  configuration, not a custom build — though it was still not *shipped inside*
+  `cwc-long-running-agents` (M5). Loop = the bash round loop in `scripts/run-harness.sh` alternating
+  generator/evaluator, writing the gated critique to the `NEXT_FINDINGS.json` baton; gating via
+  wrapper-side validation (`scripts/validate-critique.sh` / `scripts/assert-evidence.sh`, gate
+  recomputed deterministically) plus inline wrapper controls: the `AGENT_STOP` kill-file check, the
+  `STEER.md` read-inject-clear, and the per-round commit. (No PreToolUse hook scripts ship in this
+  scaffold — the upstream demo's `kill-switch.sh`/`steer.sh`/`commit-on-stop.sh` hook artifacts are
+  replaced by these wrapper-side equivalents; see HARNESS §2 X1'.)
 - **Mode B (Human):** per-worktree dev servers + `git diff main`; merge the winner + cleanup. Capture
   critique in a REVIEW-SHEET that `human-seat-to-json.sh` converts to the **same gated artifact** the AI
   evaluator emits — keeping modes structurally interchangeable (not proven-equivalent; see L4/HARNESS §16).
@@ -230,7 +236,7 @@ to a **shared feedback file the generator reads next pass**.
 | **rubric / criteria** | L5 — the four scoring dimensions + weight direction |
 | **critique** | L6 — per-criterion score + evidence-bound change requests + refine/pivot |
 | **LLM-as-judge (pointwise / pairwise)** | the scoring component (screen / tie-break) |
-| **baton** | the feedback file (`NEXT_FINDINGS.md` / `FINDINGS.md`) that keeps the loop alive |
+| **baton** | the feedback file (`NEXT_FINDINGS.json`) that keeps the loop alive; `NEXT_FINDINGS.md` is a derived human mirror never read by the loop, `FINDINGS.md` is deprecated |
 | **refine vs pivot** | L7 — improve current direction vs switch aesthetic |
 | **convergence** | L8 — winner locked |
 

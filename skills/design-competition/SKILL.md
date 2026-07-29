@@ -16,5 +16,14 @@ See the included `README.md` and `WORKFLOW.md` for detailed rules on how to run 
 - **Optional/contextual:** Playwright/MCP (for Auto mode), ImageMagick `montage` (for contact sheets), and `ajv` (for strict JSON schema validation).
 
 ## Quick Start
-1. Provide a `DESIGN.md` and `BRIEF.yaml` in the project root to define the L0/L1 intent.
-2. Execute `run-harness.sh` to trigger the evaluation loop.
+1. Provide a `DESIGN.md` and `BRIEF.yaml` in the target project root to define the L0/L1 intent
+   (plus `tokens/primitives.tokens.json` for the frozen substrate).
+2. Check the preconditions: the target project is a git repo with **at least one commit**, and the
+   candidate app is being served at `http://localhost:$PORT` (default 4173) before the loop starts.
+3. Run the loop from anywhere:
+   `MODE=auto PROJECT=/path/to/project scripts/run-harness.sh` (or `MODE=human`).
+   The script itself installs this skill's subagents (`.claude/agents/{generator,evaluator,supervisor}.md`)
+   into the target project's `.claude/agents/` and, in Auto mode, copies the pinned Playwright MCP
+   config (`templates/mcp.json`) into each round dir — no manual agent or MCP setup.
+   In Human mode it renders a blank `REVIEW-SHEET.md` into the round dir and blocks until you save
+   the filled sheet as `REVIEW-SHEET.filled.md` (touch `runs/<id>/AGENT_STOP` to halt).

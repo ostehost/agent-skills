@@ -38,7 +38,7 @@ All files in §3 marked `[on disk]` exist under the project root. `bash -n` pass
 
 ## 2. Resolution Register (unchanged from prior refined pass; summarized)
 
-C3' (drop seat identity + all seat-correlated stats from the gated artifact → sidecar; quantize auto EV to the 0.5 grid), C5' (1–5 on 0.5 grid both seats), C7 (evaluator+capture wrapper-owned, evaluator never writes files), C8 (never stop on PASS), C10' (axe floor is explicitly PARTIAL; human 43%-class findings are advisory change_requests, never floor keys), R-VISION (M1/inv 8), R-INJECTION (M2: page untrusted, `browser_evaluate` runs only the pinned axe script, page text quarantined, gate recomputed deterministically), R-UNRENDERABLE (M3), R-NOVELTY (M4: perceptual diff over rendered shots), R-HEADLESS-FLOOR (M6), R-CONFIDENCE (M7: confidence advisory, removed from gating), X1' (PreToolUse hooks authoritative; Stop hook optional non-authoritative backstop), X2' (`weighted_total` single name, penalty-consistent example), X3' (only mode branch = which evaluator to invoke), X4' (`recommendation` enum = refine|pivot). All stand and are now *embodied in files*, not just prose.
+C3' (drop seat identity + all seat-correlated stats from the gated artifact → sidecar; quantize auto EV to the 0.5 grid), C5' (1–5 on 0.5 grid both seats), C7 (evaluator+capture wrapper-owned, evaluator never writes files), C8 (never stop on PASS), C10' (axe floor is explicitly PARTIAL; human 43%-class findings are advisory change_requests, never floor keys), R-VISION (M1/inv 8), R-INJECTION (M2: page untrusted, `browser_evaluate` runs only the pinned axe script, page text quarantined, gate recomputed deterministically), R-UNRENDERABLE (M3), R-NOVELTY (M4: perceptual diff over rendered shots), R-HEADLESS-FLOOR (M6), R-CONFIDENCE (M7: confidence advisory, removed from gating), X1' (wrapper-authoritative control: `run-harness.sh` itself checks the `AGENT_STOP` kill-file, read-inject-clears `STEER.md`, and commits per round — no PreToolUse hook scripts ship in this scaffold; the Stop hook remains an optional non-authoritative crash backstop), X2' (`weighted_total` single name, penalty-consistent example), X3' (only mode branch = which evaluator to invoke), X4' (`recommendation` enum = refine|pivot). All stand and are now *embodied in files*, not just prose.
 
 ---
 
@@ -52,17 +52,24 @@ project/
 ├── rubric.md                       [on disk] L5 human-readable + few-shot anchor placeholders
 ├── schemas/critique.schema.json    [on disk] L6 gated contract (draft 2020-12) — seat-blind, closed
 ├── loop-config.yaml                [on disk] L7 caps/stop conditions (all unverified)
-├── run-harness.sh                  [on disk] L10/X wrapper + loop (SDK-less fallback)
-├── capture-shots.sh                [on disk] shared pinned capture (NOT a seat)
-├── contact-sheet.sh                [on disk] L3 best-of-N montage
-├── check-conformance.sh            [on disk] NEW: proves the contracts (§17)
-├── validate-critique.sh            [on disk] NEW: jq-only schema fallback (ajv-compatible call shape)
-├── assert-evidence.sh              [on disk] NEW: evidence files must exist on disk
-├── render-baton-md.sh              [on disk] NEW: derive human mirror from baton
-├── human-seat-to-json.sh           [on disk] NEW: human REVIEW-SHEET → identical gated JSON
+├── scripts/run-harness.sh          [on disk] L10/X wrapper + loop (SDK-less fallback)
+├── scripts/capture-shots.sh        [on disk] shared pinned capture (NOT a seat)
+├── scripts/contact-sheet.sh        [on disk] L3 best-of-N montage
+├── scripts/check-conformance.sh    [on disk] NEW: proves the contracts (§17)
+├── scripts/validate-critique.sh    [on disk] NEW: jq-only schema fallback (ajv-compatible call shape)
+├── scripts/assert-evidence.sh      [on disk] NEW: evidence files must exist on disk
+├── scripts/render-baton-md.sh      [on disk] NEW: derive human mirror from baton
+├── scripts/human-seat-to-json.sh   [on disk] NEW: human REVIEW-SHEET → identical gated JSON
 ├── templates/{NEXT_FINDINGS.json,NEXT_FINDINGS.md,FINDINGS.md}  [on disk]
-├── calibration/{anchors.jsonl,agreement.json}   (gold-set; fill from real data)
+├── templates/mcp.json              [on disk] pinned Playwright MCP config (copied into each round dir, Auto mode)
+├── templates/REVIEW-SHEET.md       [on disk] canonical blank human-seat form (rendered per round, Human mode)
+├── calibration/{anchors.jsonl,agreement.json}   (NOT on disk — no gold-set exists yet; rubric.md anchors
+│                                    are unfilled placeholders until this is created from real data)
+├── .claude/agents/generator.md     [on disk] L2 generator (two-pass plan→build)
 ├── .claude/agents/evaluator.md     [on disk] L4a auto seat (write-locked, multimodal, injection-hardened)
+├── .claude/agents/supervisor.md    [on disk] L7 CRDAL supervisor (optional; writes only STEER.md)
+│                                    (all three installed into the TARGET project's .claude/agents/
+│                                     by run-harness.sh at startup — the CLI discovers them there)
 └── runs/<run_id>/                  (created at runtime)
     ├── RUN_MANIFEST.json events.jsonl scores.csv budgets.json STOP_REASON
     ├── NEXT_FINDINGS.json          THE baton (loop-read). NEXT_FINDINGS.md = derived mirror (never read).

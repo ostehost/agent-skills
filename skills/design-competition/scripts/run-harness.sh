@@ -17,6 +17,12 @@ mkdir -p "$CAND"
 cp "$SKILL_DIR/templates/NEXT_FINDINGS.json" "$RUN/NEXT_FINDINGS.json"
 echo 0 > "$RUN/budgets.json.spent"
 
+# --- install the skill's subagents into the TARGET project (RUN-2) ---
+# `claude --agent <name>` discovers agents in the invocation project's .claude/agents/,
+# not in this skill's own tree — so materialize them before the first round.
+mkdir -p "$PROJECT/.claude/agents"
+cp "$SKILL_DIR/.claude/agents/"*.md "$PROJECT/.claude/agents/"
+
 log(){ printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >> "$RUN/events.jsonl"; }
 
 sum_budget(){ # add a ResultMessage total_cost_usd to the running total (X: no cumulative field)
@@ -40,12 +46,14 @@ for ((n=0; n<MAX_ROUNDS; n++)); do
   STEER=""; [ -f "$RUN/STEER.md" ] && { STEER=$(cat "$RUN/STEER.md"); : > "$RUN/STEER.md"; }
 
   # --- GENERATOR (reads exactly one baton: NEXT_FINDINGS.json) ---
+  # Run from $PROJECT so the CLI resolves .claude/agents/ there; a CLI failure is a
+  # harness error (stop error), distinct from bad model output (the invalid-critique fallback below).
   log "round $n generate"
-  claude --agent generator \
+  (cd "$PROJECT" && claude --agent generator \
     -p "Read $RUN/NEXT_FINDINGS.json (the baton — the single CURRENT critique, not a transcript),
         DESIGN.md, BRIEF.yaml, tokens/, and $RUN/scores.csv (the running trend, if present). $STEER
         Two-pass plan-then-build into $RD/build. You decide refine|pivot from the scores.csv trend." \
-    --output-format json > "$RD/gen.result.json" || true
+    --output-format json > "$RD/gen.result.json") || { log "round $n generator CLI failed"; stop error; }
   sum_budget "$(jq -r '.total_cost_usd // 0' "$RD/gen.result.json")"
 
   # --- SHARED PINNED CAPTURE (invariant 3 / S4): NOT a seat ---
@@ -56,16 +64,26 @@ for ((n=0; n<MAX_ROUNDS; n++)); do
   # --- EVALUATOR (the ONLY mode branch: pick which seat to invoke) ---
   K=0; OUT="$RD/critique-$K.json"; AUDIT="$RD/critique-$K.audit.json"
   if [ "$MODE" = "auto" ]; then
-    claude --agent evaluator \
+    # Materialize the pinned Playwright MCP config (RUN-1): nothing else creates it,
+    # and --strict-mcp-config errors out if the file is absent.
+    cp "$SKILL_DIR/templates/mcp.json" "$RD/mcp.json"
+    (cd "$PROJECT" && claude --agent evaluator \
       --mcp-config "$RD/mcp.json" --strict-mcp-config \
       --allowedTools "mcp__playwright__*" \
       -p "Evaluate http://localhost:$PORT. Use shots/ at $RD/shots (already captured). Emit L6 JSON. NO seat field." \
-      --output-format json > "$RD/eval.result.json" || true
+      --output-format json > "$RD/eval.result.json") || { log "round $n evaluator CLI failed"; stop error; }
     sum_budget "$(jq -r '.total_cost_usd // 0' "$RD/eval.result.json")"
     jq '.structured_output // .result | fromjson? // .' "$RD/eval.result.json" > "$OUT"
   else
-    # human seat: wrapper converts the filled REVIEW-SHEET form to the same JSON path
-    "$SKILL_DIR/scripts/human-seat-to-json.sh" "$RD/REVIEW-SHEET.filled.md" > "$OUT"
+    # human seat (RUN-3): render the blank form, then BLOCK until the human saves the
+    # filled sheet (or halts via the AGENT_STOP kill-file). A malformed sheet must fall
+    # into the invalid-critique -> UNRENDERABLE fallback below, never kill the run.
+    cp "$SKILL_DIR/templates/REVIEW-SHEET.md" "$RD/REVIEW-SHEET.md"
+    printf 'human seat: fill %s\n            save it as %s to continue (touch %s to halt)\n' \
+      "$RD/REVIEW-SHEET.md" "$RD/REVIEW-SHEET.filled.md" "$RUN/AGENT_STOP"
+    until [ -f "$RD/REVIEW-SHEET.filled.md" ] || [ -f "$RUN/AGENT_STOP" ]; do sleep 2; done
+    [ -f "$RUN/AGENT_STOP" ] && stop operator_halt
+    "$SKILL_DIR/scripts/human-seat-to-json.sh" "$RD/REVIEW-SHEET.filled.md" > "$OUT" || true
   fi
 
   # --- WRAPPER: validate schema + evidence, recompute gate deterministically (R-INJECTION defense) ---

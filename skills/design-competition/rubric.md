@@ -23,6 +23,11 @@ Any false => NEEDS_WORK. You MAY add advisory a11y change_requests for the ~43% 
 Standard targeted: WCAG 2.2 AA (current W3C Recommendation).
 
 ## Few-shot anchors  (FILL FROM A REAL GOLD-SET — do NOT fabricate)
+STATUS: NOT FILLED. No calibration gold-set exists on disk (`calibration/` is absent), so anchored
+few-shot scoring is slotted, not wired — both seats currently judge UNANCHORED, and few-shot
+calibration must not be claimed as active. To activate: run/curate a real gold-set, create
+`calibration/anchors.jsonl` ({criterion, score, shots_ref, rationale} per line), fill the lines
+below from it, and mark `calibration/` [on disk] in HARNESS.md §3.
 <!-- anchor: design_quality=5 -> shots ref: __________  rationale: __________ -->
 <!-- anchor: design_quality=3 -> shots ref: __________  rationale: __________ -->
 <!-- anchor: design_quality=1 -> shots ref: __________  rationale: __________ -->
