@@ -15,6 +15,9 @@ Public shared skills for agent workflows.
   add other one-off frontmatter fields without a real consumer; nothing enforces
   they stay current otherwise.
 - Helper scripts belong under `skills/<name>/scripts/`.
+- `skills/<name>/agents/openai.yaml` (behavior-validator, session-viewer) is a
+  host-read agent config for OpenAI-compatible hosts; repo tooling does not
+  validate it.
 - Validate after edits: `scripts/validate-skills`.
 - Do not edit generated/vendor copies in downstream repos; update here, then sync.
 

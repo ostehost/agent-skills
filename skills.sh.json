@@ -4,7 +4,7 @@
   "groupings": [
     {
       "title": "Review",
-      "description": "Skills for code review closeout and remote validation.",
+      "description": "Skills for code review closeout, behavior validation, and remote validation.",
       "skills": ["autoreview", "behavior-validator", "crabbox"]
     },
     {

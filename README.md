@@ -138,25 +138,37 @@ skills/
     scripts/
   autoreview/
     SKILL.md
+    AGENTS.md            # CLAUDE.md symlinks to it
     scripts/
+    tests/
   behavior-validator/
     SKILL.md
+    agents/              # openai.yaml host-interface config
     references/
   crabbox/
     SKILL.md
   design-competition/
     SKILL.md
-    scripts/
+    BRIEF.yaml
+    HARNESS.md
+    WORKFLOW.md
+    loop-config.yaml
+    rubric.json / rubric.md
+    .claude/agents/      # generator/evaluator/supervisor agent defs
     schemas/
+    scripts/             # incl. run-axe.sh, recompute-gate.sh
     templates/
+    tokens/
   handoff/
     SKILL.md
   session-viewer/
     SKILL.md
-    scripts/
+    tsconfig.json
+    agents/              # openai.yaml host-interface config
+    scripts/             # session-viewer.ts + core/, importers/
 scripts/
-  install-skills
-  validate-skills
+  install-skills   (+ install-skills.test.py)
+  validate-skills  (+ validate-skills.test.py)
 ```
 
 Each skill lives in `skills/<name>/` and must contain `SKILL.md`. Helper scripts
@@ -193,6 +205,9 @@ node --test skills/agent-transcript/scripts/agent-transcript.test.mjs skills/ses
 skills/design-competition/scripts/check-conformance.sh
 skills/design-competition/scripts/scripts.test.sh
 ```
+
+The last two design-competition script tests are POSIX/Linux-only (bash scripts;
+CI runs them on the Linux leg only — see `.github/workflows/validate.yml`).
 
 The validator checks every `skills/*/SKILL.md` for YAML frontmatter with required
 `name` and `description`, that `name` matches the skill directory, and that
