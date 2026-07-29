@@ -114,6 +114,15 @@ class AutoreviewHardeningTests(unittest.TestCase):
 
             self.assertIn("## image.bin\n[binary file omitted]", bundle)
             self.assertTrue(truncated)
+            self.assertEqual(truncated, ["untracked binary file omitted: image.bin"])
+            with self.assertRaisesRegex(
+                SystemExit,
+                r"(?s)codex engine refused truncated review input.*untracked binary file omitted: image\.bin",
+            ):
+                self.helper["ensure_reviewer_input_complete"](
+                    argparse.Namespace(engine="codex", tools=True),
+                    truncated,
+                )
 
     def test_local_bundle_rejects_non_utf8_untracked_text(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -2070,6 +2079,68 @@ class AutoreviewHardeningTests(unittest.TestCase):
                 True,
             )
 
+    def test_run_reviewer_retries_transient_structured_output_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            repo = init_repo(Path(tempdir))
+            report = {
+                "findings": [],
+                "overall_correctness": "patch is correct",
+                "overall_explanation": "clean",
+                "overall_confidence": 0.9,
+            }
+            replies = iter(["not structured output at all", json.dumps(report)])
+
+            def run_engine(*_args: object) -> str:
+                return next(replies)
+
+            stderr = io.StringIO()
+            with (
+                mock.patch.dict(
+                    self.helper["run_reviewer"].__globals__,
+                    {"run_engine": run_engine},
+                ),
+                contextlib.redirect_stderr(stderr),
+            ):
+                result = self.helper["run_reviewer"](
+                    argparse.Namespace(engine="codex", tools=True),
+                    repo,
+                    "prompt",
+                    set(),
+                    [],
+                    False,
+                )
+
+            self.assertEqual(result, report)
+            self.assertIn(
+                "retrying codex structured output validation after attempt 1",
+                stderr.getvalue(),
+            )
+
+    def test_run_reviewer_fails_after_repeated_structured_output_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            repo = init_repo(Path(tempdir))
+            replies = iter(["not structured output", "still not structured output"])
+
+            def run_engine(*_args: object) -> str:
+                return next(replies)
+
+            with (
+                mock.patch.dict(
+                    self.helper["run_reviewer"].__globals__,
+                    {"run_engine": run_engine},
+                ),
+                contextlib.redirect_stderr(io.StringIO()),
+                self.assertRaisesRegex(SystemExit, "non-JSON output"),
+            ):
+                self.helper["run_reviewer"](
+                    argparse.Namespace(engine="codex", tools=True),
+                    repo,
+                    "prompt",
+                    set(),
+                    [],
+                    False,
+                )
+
     def test_safe_git_env_preserves_trusted_platform_and_helper_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
@@ -2449,6 +2520,54 @@ class AutoreviewHardeningTests(unittest.TestCase):
         finally:
             release.set()
             stderr_thread.join(timeout=1)
+
+    def test_parallel_test_finish_bounded_wait_kills_hung_process(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            test_home = Path(tempdir) / "test-home"
+            test_home.mkdir()
+            proc = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            setattr(proc, "_autoreview_test_home", test_home)
+
+            stderr = io.StringIO()
+            before = time.monotonic()
+            with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+                result = self.helper["finish_parallel_tests"](proc, time.time(), timeout=0.5)
+            elapsed = time.monotonic() - before
+
+            self.assertNotEqual(result, 0)
+            self.assertIsNotNone(proc.returncode)
+            self.assertLess(elapsed, 30)
+            self.assertIn("parallel test process killed", stderr.getvalue())
+            self.assertFalse(test_home.exists())
+
+    def test_parallel_test_finish_kills_shell_descendants(self) -> None:
+        if os.name != "posix":
+            self.skipTest("process-group cleanup semantics are POSIX-specific")
+        with tempfile.TemporaryDirectory() as tempdir:
+            repo = init_repo(Path(tempdir))
+            command = f'"{sys.executable}" -c "import time; time.sleep(60)"'
+            with contextlib.redirect_stdout(io.StringIO()):
+                proc, started = self.helper["start_parallel_tests"](command, repo, "default")
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+                self.helper["finish_parallel_tests"](proc, started, timeout=0.5)
+
+            # The shell exits fast; the descendant python must die with the group.
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                try:
+                    os.killpg(proc.pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.05)
+            else:
+                os.killpg(proc.pid, 9)
+                self.fail("parallel test process group survived the bounded-wait cleanup")
+            self.assertIn("parallel test process killed", stderr.getvalue())
 
     def test_source_tree_snapshot_detects_parallel_test_mutations(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -3123,6 +3242,35 @@ class AutoreviewHardeningTests(unittest.TestCase):
             claude_bin="claude",
             fallback_model=None,
             model="fable",
+        )
+        version_result = subprocess.CompletedProcess(
+            ["claude", "--version"],
+            0,
+            "2.1.169 (Claude Code)",
+            "",
+        )
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            repo = init_repo(Path(tempdir))
+            with mock.patch.dict(
+                self.helper["ensure_claude_isolation_supported"].__globals__,
+                {
+                    "resolve_command": lambda *_args: "/usr/bin/claude",
+                    "safe_engine_env": lambda *_args, **_kwargs: {},
+                    "safe_temp_root": lambda _repo: Path(tempdir),
+                    "run": lambda *_args, **_kwargs: version_result,
+                },
+            ), self.assertRaisesRegex(
+                SystemExit,
+                "2.1.170",
+            ):
+                self.helper["ensure_claude_isolation_supported"](args, repo)
+
+    def test_claude_spaced_fallback_chain_requires_fable_safe_mode_version(self) -> None:
+        args = argparse.Namespace(
+            claude_bin="claude",
+            fallback_model="claude-opus-4-8, claude-fable-5",
+            model="claude-opus-4-8",
         )
         version_result = subprocess.CompletedProcess(
             ["claude", "--version"],

@@ -29,9 +29,18 @@ if ($PSBoundParameters.ContainsKey('Engine')) {
     }
 }
 
+# Windows-first probe: the py launcher only exists on Windows, so it wins
+# there; macOS/Linux pwsh falls through to python3 then python, matching the
+# bash wrapper's probe order.
 $PyLauncher = Get-Command py -ErrorAction SilentlyContinue
 if ($null -ne $PyLauncher) {
     & $PyLauncher.Source -3 $Harness @ForwardedArgs
+    exit $LASTEXITCODE
+}
+
+$Python3 = Get-Command python3 -ErrorAction SilentlyContinue
+if ($null -ne $Python3) {
+    & $Python3.Source $Harness @ForwardedArgs
     exit $LASTEXITCODE
 }
 

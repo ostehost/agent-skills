@@ -16,6 +16,7 @@ import os
 import queue
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -1765,12 +1766,19 @@ def bounded(text: str, limit: int = 180_000) -> str:
     return text[:limit] + f"\n\n[truncated at {limit} characters]\n"
 
 
-def ensure_reviewer_input_complete(reviewer: argparse.Namespace, input_truncated: bool) -> None:
-    if input_truncated:
+def ensure_reviewer_input_complete(reviewer: argparse.Namespace, input_truncated: bool | list[str]) -> None:
+    if not input_truncated:
+        return
+    if isinstance(input_truncated, bool):
         raise SystemExit(
             f"{reviewer.engine} engine refused truncated review input because it cannot recover omitted diff hunks; "
             "reduce the change/input size"
         )
+    details = "\n".join(f"- {display_escape(reason, 500)}" for reason in input_truncated)
+    raise SystemExit(
+        f"{reviewer.engine} engine refused truncated review input because it cannot recover omitted content; "
+        f"exclude or reduce these inputs and rerun:\n{details}"
+    )
 
 
 def bounded_field(text: str, limit: int) -> str:
@@ -5322,7 +5330,7 @@ def local_status(repo: Path, untracked: list[str]) -> str:
     return "\n".join(lines)
 
 
-def local_bundle(repo: Path) -> tuple[str, bool]:
+def local_bundle(repo: Path) -> tuple[str, list[str]]:
     staged_patch = git(repo, "diff", *SAFE_DIFF_FLAGS, "--cached", "--patch")
     unstaged_patch = git(repo, "diff", *SAFE_DIFF_FLAGS, "--patch")
     require_no_binary_diff(
@@ -5372,13 +5380,14 @@ def local_bundle(repo: Path) -> tuple[str, bool]:
         git(repo, "diff", *SAFE_DIFF_FLAGS, "--stat"),
         unstaged_patch,
     ]
-    input_truncated = len(staged_patch) > 180_000 or len(unstaged_patch) > 180_000
+    truncation_reasons: list[str] = []
     if untracked:
         parts.append("# Untracked Files")
         for rel, content, truncated in untracked_snapshots:
-            input_truncated = input_truncated or truncated
+            if truncated:
+                truncation_reasons.append(f"untracked binary file omitted: {rel}")
             parts.append(f"## {rel}\n{content}")
-    return "\n\n".join(parts), input_truncated
+    return "\n\n".join(parts), truncation_reasons
 
 
 def source_file_fingerprint(path: Path) -> tuple[str, int, int, str]:
@@ -5532,7 +5541,7 @@ def source_tree_snapshot(
     return head, index_entries, fingerprints
 
 
-def branch_bundle(repo: Path, base_ref: str) -> tuple[str, bool]:
+def branch_bundle(repo: Path, base_ref: str) -> tuple[str, list[str]]:
     base_ref = validate_git_ref(repo, base_ref, "base")
     diff_range = f"{base_ref}...HEAD"
     branch_patch = git(
@@ -5577,6 +5586,8 @@ def branch_bundle(repo: Path, base_ref: str) -> tuple[str, bool]:
         ),
     )
     branch_patch = validate_review_patch("branch diff", branch_paths, branch_patch)
+    # No size-based truncation reason below: oversized diffs already failed closed
+    # in validate_review_patch (SystemExit above MAX_BUNDLE_TEXT_BYTES).
     return "\n\n".join(
         [
             "# Branch Diff",
@@ -5591,10 +5602,10 @@ def branch_bundle(repo: Path, base_ref: str) -> tuple[str, bool]:
             ),
             branch_patch,
         ]
-    ), len(branch_patch) > 180_000
+    ), []
 
 
-def commit_bundle(repo: Path, commit_ref: str) -> tuple[str, bool]:
+def commit_bundle(repo: Path, commit_ref: str) -> tuple[str, list[str]]:
     commit_ref = validate_git_ref(repo, commit_ref, "commit")
     parents = git(repo, "rev-list", "--parents", "-n", "1", commit_ref).split()
     if len(parents) > 2:
@@ -5663,7 +5674,7 @@ def commit_bundle(repo: Path, commit_ref: str) -> tuple[str, bool]:
             ),
             commit_patch,
         ]
-    ), len(commit_patch) > 180_000
+    ), []
 
 
 def review_paths(repo: Path, target: str, target_ref: str | None, commit_ref: str) -> set[str]:
@@ -5723,27 +5734,29 @@ def validate_evidence_file(repo: Path, raw_path: str, label: str) -> tuple[Path,
     return path, content, truncated
 
 
-def load_extra_prompt(args: argparse.Namespace, repo: Path) -> tuple[str, bool]:
+def load_extra_prompt(args: argparse.Namespace, repo: Path) -> tuple[str, list[str]]:
     chunks: list[str] = []
-    input_truncated = False
+    truncation_reasons: list[str] = []
     for value in args.prompt or []:
         require_no_secret_values("--prompt", value)
         chunks.append(value)
     for path in args.prompt_file or []:
         resolved, content, truncated = validate_evidence_file(repo, path, "--prompt-file")
-        input_truncated = input_truncated or truncated
+        if truncated:
+            truncation_reasons.append(f"--prompt-file content omitted or truncated: {resolved.relative_to(repo.resolve())}")
         chunks.append(f"# Prompt file: {resolved.relative_to(repo.resolve())}\n{content}")
-    return "\n\n".join(chunks), input_truncated
+    return "\n\n".join(chunks), truncation_reasons
 
 
-def load_datasets(args: argparse.Namespace, repo: Path) -> tuple[str, bool]:
+def load_datasets(args: argparse.Namespace, repo: Path) -> tuple[str, list[str]]:
     chunks: list[str] = []
-    input_truncated = False
+    truncation_reasons: list[str] = []
     for spec in args.dataset or []:
         path, content, truncated = validate_evidence_file(repo, spec, "--dataset")
-        input_truncated = input_truncated or truncated
+        if truncated:
+            truncation_reasons.append(f"--dataset content omitted or truncated: {path.relative_to(repo.resolve())}")
         chunks.append(f"# Dataset: {path.relative_to(repo.resolve())}\n{content}")
-    return "\n\n".join(chunks), input_truncated
+    return "\n\n".join(chunks), truncation_reasons
 
 
 def review_scope_policy() -> str:
@@ -6077,7 +6090,7 @@ def ensure_claude_isolation_supported(args: argparse.Namespace, repo: Path) -> N
     )
     temp_root = safe_temp_root(repo)
     result = run([claude_bin, "--version"], temp_root, check=False, env=engine_env)
-    selected_models = [args.model, *(getattr(args, "fallback_model", "") or "").split(",")]
+    selected_models = [args.model, *(part.strip() for part in (getattr(args, "fallback_model", "") or "").split(","))]
     uses_fable = any(model in {"claude-fable-5", "fable"} for model in selected_models)
     minimum_version = CLAUDE_FABLE_MIN_VERSION if uses_fable else CLAUDE_SAFE_MODE_MIN_VERSION
     version_reason = "for claude-fable-5" if uses_fable else "for --safe-mode"
@@ -6262,8 +6275,13 @@ def codex_command(
     # User overrides go before the isolation flags so isolation stays authoritative on conflicts.
     for override in codex_config_overrides(args):
         cmd.extend(["-c", override])
-    # Dedicated settings win over the generic config escape hatch.
-    if args.thinking:
+    # Dedicated settings win over the generic config escape hatch, but an
+    # explicit --codex-config model_reasoning_effort wins over the built-in
+    # default thinking level.
+    if args.thinking and not (
+        getattr(args, "thinking_from_default", False)
+        and "model_reasoning_effort" in codex_config_keys(args)
+    ):
         cmd.extend(["-c", f'model_reasoning_effort="{args.thinking}"'])
     # After --codex-config so an explicit speed wins over a service_tier value in the raw overrides.
     speed_override = codex_speed_override(args)
@@ -6496,15 +6514,6 @@ def run_opencode(args: argparse.Namespace, repo: Path, prompt: str) -> str:
     )
 
 
-def cursor_local_mcp_paths(repo: Path) -> list[Path]:
-    candidates = [
-        repo / ".cursor" / "mcp.json",
-        repo / ".mcp.json",
-        repo / "mcp.json",
-    ]
-    return [path for path in candidates if path.exists()]
-
-
 def cursor_home_candidates() -> set[Path]:
     home_candidates = [Path.home()]
     for name in ("HOME", "USERPROFILE"):
@@ -6514,11 +6523,6 @@ def cursor_home_candidates() -> set[Path]:
         if home_path := os.environ.get("HOMEPATH"):
             home_candidates.append(Path(f"{drive}{home_path}"))
     return set(home_candidates)
-
-
-def cursor_global_mcp_paths() -> list[Path]:
-    paths = {home / ".cursor" / "mcp.json" for home in cursor_home_candidates()}
-    return sorted((path for path in paths if path.exists()), key=str)
 
 
 def json_file_declares_hooks(path: Path) -> bool:
@@ -6545,117 +6549,6 @@ def cursor_global_hook_paths() -> list[Path]:
             if claude_settings.exists() and json_file_declares_hooks(claude_settings):
                 paths.add(claude_settings)
     return sorted(paths, key=str)
-
-
-def cursor_local_hook_paths(repo: Path) -> list[Path]:
-    candidates = [
-        repo / ".cursor" / "hooks.json",
-        repo / ".claude" / "settings.json",
-        repo / ".claude" / "settings.local.json",
-    ]
-    return [path for path in candidates if path.exists()]
-
-
-def cursor_local_permission_paths(repo: Path) -> list[Path]:
-    path = repo / ".cursor" / "cli.json"
-    return [path] if path.exists() else []
-
-
-def format_repo_paths(repo: Path, paths: list[Path]) -> str:
-    return "; ".join(str(path.relative_to(repo)) for path in paths)
-
-
-def cursor_result_event(text: str) -> dict[str, Any] | None:
-    stripped = text.strip()
-    if not stripped:
-        return None
-    try:
-        parsed = json.loads(stripped)
-    except json.JSONDecodeError:
-        parsed = None
-    if isinstance(parsed, dict) and parsed.get("type") == "result":
-        return parsed
-    for line in reversed(stripped.splitlines()):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(event, dict) and event.get("type") == "result":
-            return event
-    return None
-
-
-def print_cursor_metadata(text: str) -> None:
-    event = cursor_result_event(text)
-    if not event:
-        return
-    parts: list[str] = []
-    for key in ("session_id", "request_id"):
-        value = event.get(key)
-        if isinstance(value, str) and value:
-            parts.append(f"{key}={value}")
-    if parts:
-        print("cursor metadata: " + " ".join(parts), file=sys.stderr)
-
-
-def cursor_help_text(cursor_bin: str, repo: Path, engine_env: dict[str, str]) -> str:
-    with tempfile.TemporaryDirectory(prefix="autoreview-cursor-probe.") as tempdir:
-        result = run([cursor_bin, "--help"], Path(tempdir), check=False, env=engine_env)
-    if result.returncode != 0:
-        output = (result.stderr or result.stdout).strip()
-        raise SystemExit(f"cursor engine could not read CLI help from {cursor_bin}: {output[:1000]}")
-    return result.stdout + result.stderr
-
-
-def ensure_cursor_supported(
-    args: argparse.Namespace,
-    repo: Path,
-    cursor_bin: str,
-    engine_env: dict[str, str],
-) -> None:
-    help_text = cursor_help_text(cursor_bin, repo, engine_env)
-    missing: list[str] = []
-    if "--print" not in help_text and "-p" not in help_text:
-        missing.append("--print/-p")
-    if "--output-format" not in help_text:
-        missing.append("--output-format")
-    if "--mode" not in help_text:
-        missing.append("--mode")
-    if "--sandbox" not in help_text:
-        missing.append("--sandbox")
-    if args.model and "--model" not in help_text and "-m" not in help_text:
-        missing.append("--model/-m")
-    if missing:
-        raise SystemExit(
-            "cursor engine requires CLI support for "
-            + ", ".join(missing)
-            + ". Current Cursor CLI help does not advertise the required option(s)."
-        )
-
-
-def build_cursor_cmd(
-    args: argparse.Namespace,
-    repo: Path,
-    cursor_bin: str,
-    engine_env: dict[str, str],
-) -> list[str]:
-    ensure_cursor_supported(args, repo, cursor_bin, engine_env)
-    cmd = [
-        cursor_bin,
-        "--print",
-        "--output-format",
-        "stream-json" if args.stream_engine_output else "json",
-        "--mode",
-        "ask",
-        "--sandbox",
-        "enabled",
-    ]
-    if args.model:
-        cmd.extend(["--model", args.model])
-    return cmd
 
 
 def run_cursor(args: argparse.Namespace, repo: Path, prompt: str) -> str:
@@ -8081,6 +7974,13 @@ def start_parallel_tests(
             "encoding": SUBPROCESS_TEXT_ENCODING,
             "errors": SUBPROCESS_TEXT_ERRORS,
         }
+        # shell=True makes proc the shell, not the test runner; run the command in
+        # its own process group/session so the bounded-wait cleanup can stop the
+        # whole tree (npm test, pytest, ...) instead of orphaning it.
+        if os.name == "posix":
+            popen_kwargs["start_new_session"] = True
+        else:
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         if shell_kind == "default" or shell_kind == "cmd":
             proc = subprocess.Popen(command, shell=True, **popen_kwargs)
         elif shell_kind == "powershell":
@@ -8113,7 +8013,40 @@ def start_parallel_tests(
     stderr_thread.start()
     setattr(proc, "_autoreview_test_home", test_home)
     setattr(proc, "_autoreview_stderr_thread", stderr_thread)
+    setattr(proc, "_autoreview_process_group", True)
     return proc, time.time()
+
+
+def signal_parallel_test_group(proc: subprocess.Popen, force: bool) -> None:
+    # Only signal the group when start_parallel_tests created one — a plain
+    # Popen shares the caller's group and killpg would take the helper down too.
+    own_group = bool(getattr(proc, "_autoreview_process_group", False))
+    if os.name == "posix" and own_group:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL if force else signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        return
+    if os.name != "posix" and own_group:
+        # Windows has no graceful group signal: terminating only the cmd/pwsh
+        # parent orphans the test child, and the subsequent wait() would then
+        # "succeed" without the tree ever dying — so take the whole tree down
+        # on the first timeout.
+        # Absolute system path: a bare "taskkill" could resolve from the reviewed
+        # checkout's CWD on Windows, handing it arbitrary-code execution.
+        taskkill = str(
+            Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "taskkill.exe"
+        )
+        subprocess.run(
+            [taskkill, "/F", "/T", "/PID", str(proc.pid)],
+            capture_output=True,
+            check=False,
+        )
+        return
+    if force:
+        proc.kill()
+    else:
+        proc.terminate()
 
 
 def relay_parallel_test_stderr(stream: Any, java_tool_options: str) -> None:
@@ -8128,9 +8061,22 @@ def relay_parallel_test_stderr(stream: Any, java_tool_options: str) -> None:
         sys.stderr.flush()
 
 
-def finish_parallel_tests(proc: subprocess.Popen, started: float) -> int:
+def finish_parallel_tests(proc: subprocess.Popen, started: float, timeout: float | None = None) -> int:
     try:
-        proc.wait()
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            signal_parallel_test_group(proc, force=False)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                signal_parallel_test_group(proc, force=True)
+                proc.wait()
+            print(
+                f"parallel test process killed after {int(time.time() - started)}s: "
+                "it was still running when the review failed",
+                file=sys.stderr,
+            )
         stderr_thread = getattr(proc, "_autoreview_stderr_thread", None)
         if isinstance(stderr_thread, threading.Thread):
             stderr_thread.join(timeout=0.25)
@@ -8167,7 +8113,7 @@ def parse_args() -> argparse.Namespace:
         action="append",
         help="Model for all reviewers or engine=model. Repeatable. Defaults: codex=gpt-5.6-sol with an access-only gpt-5.6-terra retry, claude=claude-fable-5.",
     )
-    parser.add_argument("--thinking", action="append", help="Thinking/effort for all reviewers or engine=level. Repeatable. Codex: none, minimal, low, medium, high, xhigh, max. Claude: low, medium, high, xhigh, max. Droid: off, none, low, medium, high. Pi: off, minimal, low, medium, high, xhigh. OpenCode: minimal, low, medium, high, max. Cursor: none.")
+    parser.add_argument("--thinking", action="append", help="Thinking/effort for all reviewers or engine=level. Repeatable. Codex: none, minimal, low, medium, high, xhigh, max. Claude: low, medium, high, xhigh, max. Droid: off, none, low, medium, high, xhigh, max. Pi: off, minimal, low, medium, high, xhigh. OpenCode: minimal, low, medium, high, max. Cursor: none.")
     parser.add_argument(
         "--fallback-model",
         action="append",
@@ -8392,14 +8338,14 @@ def reviewer_args(args: argparse.Namespace) -> list[argparse.Namespace]:
             or env_global_model
             or DEFAULT_MODEL_BY_ENGINE.get(engine)
         )
-        thinking = (
+        explicit_thinking = (
             inline_thinking
             or thinking_by_engine.get(engine)
             or global_thinking
             or env_thinking_by_engine.get(engine)
             or env_global_thinking
-            or DEFAULT_THINKING_BY_ENGINE.get(engine)
         )
+        thinking = explicit_thinking or DEFAULT_THINKING_BY_ENGINE.get(engine)
         if engine == "claude":
             fallback_model = (
                 fallback_by_engine.get(engine)
@@ -8418,6 +8364,7 @@ def reviewer_args(args: argparse.Namespace) -> list[argparse.Namespace]:
         clone.engine = engine
         clone.model = model
         clone.thinking = thinking
+        clone.thinking_from_default = explicit_thinking is None
         clone.fallback_model = fallback_model
         clone.tools = False if engine in {"droid", "pi"} else args.tools
         result.append(clone)
@@ -8441,10 +8388,10 @@ def run_reviewer(
     prompt: str,
     changed_paths: set[str],
     required: list[str],
-    input_truncated: bool = False,
+    input_truncated: bool | list[str] = False,
 ) -> dict[str, Any]:
     ensure_reviewer_input_complete(args, input_truncated)
-    attempts = 3 if args.engine == "cursor" else 1
+    attempts = 2
     for attempt in range(1, attempts + 1):
         raw = run_engine(args, repo, prompt)
         try:
@@ -8497,7 +8444,7 @@ def run_panel(
     repo: Path,
     prompt: str,
     changed_paths: set[str],
-    input_truncated: bool,
+    input_truncated: bool | list[str],
 ) -> dict[str, Any]:
     reports: list[tuple[str, dict[str, Any]]] = []
     failures: list[str] = []
@@ -8600,9 +8547,13 @@ def self_test_config_defaults() -> None:
             )
         if default_codex.thinking != "high":
             raise SystemExit(f"self-test config defaults failed: default codex thinking={default_codex.thinking!r}")
+        if not default_codex.thinking_from_default:
+            raise SystemExit("self-test config defaults failed: default codex thinking should be marked from-default")
         max_effort = reviewer_args(reviewer_test_args(engine="codex", thinking=["max"]))[0]
         if max_effort.thinking != "max":
             raise SystemExit("self-test config defaults failed: Codex max thinking should be accepted")
+        if max_effort.thinking_from_default:
+            raise SystemExit("self-test config defaults failed: explicit thinking should not be marked from-default")
         default_claude = reviewer_args(reviewer_test_args(engine="claude"))[0]
         if default_claude.model != "claude-fable-5":
             raise SystemExit(f"self-test config defaults failed: default claude model={default_claude.model!r}")
@@ -8615,6 +8566,8 @@ def self_test_config_defaults() -> None:
             raise SystemExit(f"self-test config defaults failed: model={codex.model!r}")
         if codex.thinking != "high":
             raise SystemExit(f"self-test config defaults failed: thinking={codex.thinking!r}")
+        if codex.thinking_from_default:
+            raise SystemExit("self-test config defaults failed: env thinking should not be marked from-default")
         os.environ.pop("AUTOREVIEW_CODEX_MODEL")
         os.environ.pop("AUTOREVIEW_CODEX_THINKING")
         global_only = reviewer_args(reviewer_test_args(engine="codex"))[0]
@@ -8916,7 +8869,7 @@ def main() -> int:
         target_ref = args.commit
     extra_prompt, prompt_truncated = load_extra_prompt(args, repo)
     datasets, datasets_truncated = load_datasets(args, repo)
-    input_truncated = bundle_truncated or prompt_truncated or datasets_truncated
+    input_truncated = [*bundle_truncated, *prompt_truncated, *datasets_truncated]
     prompt = build_prompt(
         repo,
         target,
@@ -8950,8 +8903,13 @@ def main() -> int:
         else:
             report = run_panel(args, reviewers, repo, prompt, changed_paths, input_truncated)
             label = "autoreview panel"
-    finally:
-        tests_status = finish_parallel_tests(*tests_proc) if tests_proc else 0
+    except BaseException:
+        # A failed review must not block forever on a still-running test
+        # command; give it a bounded window, then kill it.
+        if tests_proc:
+            finish_parallel_tests(*tests_proc, timeout=10)
+        raise
+    tests_status = finish_parallel_tests(*tests_proc) if tests_proc else 0
 
     if source_tree_snapshot(repo) != review_source_snapshot:
         print(

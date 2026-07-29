@@ -167,6 +167,59 @@ class AutoreviewCompatibilityTests(unittest.TestCase):
         args = argparse.Namespace(codex_config=['model_verbosity="low"'])
         self.assertEqual(AUTOREVIEW.codex_config_keys(args), ["model_verbosity"])
 
+    def test_codex_config_reasoning_effort_beats_default_thinking_only(self) -> None:
+        def config_values(thinking_from_default: bool, codex_config: list[str] | None) -> list[str]:
+            args = argparse.Namespace(
+                codex_bin="codex",
+                codex_config=codex_config,
+                codex_speed=None,
+                stream_engine_output=False,
+                thinking="high",
+                thinking_from_default=thinking_from_default,
+                web_search=False,
+            )
+            with mock.patch.dict(os.environ), mock.patch.object(
+                AUTOREVIEW,
+                "resolve_command",
+                return_value="/usr/bin/codex",
+            ), mock.patch.object(
+                AUTOREVIEW,
+                "codex_config_isolation_flags",
+                return_value=[],
+            ), mock.patch.object(
+                AUTOREVIEW,
+                "codex_auth_config_flags",
+                return_value=[],
+            ):
+                os.environ.pop("AUTOREVIEW_CODEX_CONFIG", None)
+                os.environ.pop("AUTOREVIEW_CODEX_SPEED", None)
+                cmd = AUTOREVIEW.codex_command(
+                    args,
+                    Path("/repo"),
+                    Path("/review"),
+                    Path("/runtime"),
+                    Path("/schema.json"),
+                    Path("/out.json"),
+                    None,
+                )
+            return [cmd[index + 1] for index, flag in enumerate(cmd) if flag == "-c"]
+
+        # An explicit --codex-config model_reasoning_effort wins over the default thinking.
+        default_thinking = config_values(True, ['model_reasoning_effort="low"'])
+        self.assertIn('model_reasoning_effort="low"', default_thinking)
+        self.assertNotIn('model_reasoning_effort="high"', default_thinking)
+
+        # An explicit --thinking still wins: the dedicated flag is appended after the override.
+        explicit_thinking = config_values(False, ['model_reasoning_effort="low"'])
+        self.assertLess(
+            explicit_thinking.index('model_reasoning_effort="low"'),
+            explicit_thinking.index('model_reasoning_effort="high"'),
+        )
+
+        # Without a --codex-config override the default thinking is still applied.
+        no_override = config_values(True, None)
+        self.assertIn('model_reasoning_effort="high"', no_override)
+
     def test_codex_retries_terra_after_sol_access_failure(self) -> None:
         args = argparse.Namespace(
             codex_bin="codex",
