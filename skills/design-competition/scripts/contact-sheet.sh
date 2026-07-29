@@ -13,6 +13,10 @@ for cdir in "$RUN"/candidates/*/; do
   # newest round's shots for this candidate
   rd=$(ls -d "$cdir"round-*/ 2>/dev/null | sort -V | tail -1 || true)
   [ -z "$rd" ] && continue
+  if [ ! -f "$rd/shots/1440.png" ] || [ ! -f "$rd/shots/768.png" ] || [ ! -f "$rd/shots/375.png" ]; then
+    echo "contact-sheet: skipping $cid (incomplete shots in $rd)" >&2
+    continue
+  fi
   label="$cid"; [ "$cid" = "$BEST" ] && label="$cid  <= BEST-SO-FAR"
   row="$TMP/$cid.png"
   montage -label "$label" \

@@ -107,6 +107,17 @@ else
   pass "C3 both critiques validate against the schema (jq fallback; install ajv for full draft-2020-12)"
 fi
 
+# ---- C3b enum enforcement in the jq fallback (regression: severity check was a tautology)
+badsev=$(printf '%s' "$GATED" | jq '.change_requests[0].severity="bananas"')
+if "$S/validate-critique.sh" <(printf '%s' "$badsev") "$SCHEMA" >/dev/null 2>&1; then
+  die "C3b jq validator ACCEPTED an out-of-enum change_request severity"
+fi
+badverdict=$(printf '%s' "$GATED" | jq '.verdict="MAYBE"')
+if "$S/validate-critique.sh" <(printf '%s' "$badverdict") "$SCHEMA" >/dev/null 2>&1; then
+  die "C3b jq validator ACCEPTED an out-of-enum verdict"
+fi
+pass "C3b jq validator rejects out-of-enum severity and verdict"
+
 # ---- C4 single baton read path ----------------------------------------------
 grep -q 'NEXT_FINDINGS.json (the baton' "$S/run-harness.sh" || die "C4 generator does not read NEXT_FINDINGS.json as baton"
 # the generator prompt block must NOT read the sidecar, the md mirror, or deprecated FINDINGS.md

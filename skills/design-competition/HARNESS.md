@@ -17,7 +17,7 @@ The honest headline: the gated artifact is **structurally aligned** across seats
 - "Design competition" = informal shorthand only; never in code/artifacts.
 
 ## 0.1 Implementation status (this pass)
-All files in §3 marked `[on disk]` exist under the project root. `bash -n` passes on all 8 shell scripts; `jq -e .` passes on all 4 JSON files; `./check-conformance.sh` returns **ALL CONFORMANCE CHECKS PASSED** (§17). ajv, ImageMagick `montage`, and Playwright/Chromium are external deps NOT installed on the authoring box — scripts degrade with explicit errors and the validator falls back to a jq-only checker so the loop is runnable on a stock machine.
+All files in §3 marked `[on disk]` exist under the project root. `bash -n` passes on every shell script in `scripts/`; `jq -e .` passes on every JSON file; `./check-conformance.sh` returns **ALL CONFORMANCE CHECKS PASSED** (§17). ajv, ImageMagick `montage`, and Playwright/Chromium are external deps NOT installed on the authoring box — scripts degrade with explicit errors and the validator falls back to a jq-only checker so the loop is runnable on a stock machine.
 
 ---
 
@@ -38,7 +38,7 @@ All files in §3 marked `[on disk]` exist under the project root. `bash -n` pass
 
 ## 2. Resolution Register (unchanged from prior refined pass; summarized)
 
-C3' (drop seat identity + all seat-correlated stats from the gated artifact → sidecar; quantize auto EV to the 0.5 grid), C5' (1–5 on 0.5 grid both seats), C7 (evaluator+capture wrapper-owned, evaluator never writes files), C8 (never stop on PASS), C10' (axe floor is explicitly PARTIAL; human 43%-class findings are advisory change_requests, never floor keys), R-VISION (M1/inv 8), R-INJECTION (M2: page untrusted, `browser_evaluate` runs only the pinned axe script, page text quarantined, gate recomputed deterministically), R-UNRENDERABLE (M3), R-NOVELTY (M4: perceptual diff over rendered shots), R-HEADLESS-FLOOR (M6), R-CONFIDENCE (M7: confidence advisory, removed from gating), X1' (wrapper-authoritative control: `run-harness.sh` itself checks the `AGENT_STOP` kill-file, read-inject-clears `STEER.md`, and commits per round — no PreToolUse hook scripts ship in this scaffold; the Stop hook remains an optional non-authoritative crash backstop), X2' (`weighted_total` single name, penalty-consistent example), X3' (only mode branch = which evaluator to invoke), X4' (`recommendation` enum = refine|pivot). All stand and are now *embodied in files*, not just prose.
+C3' (drop seat identity + all seat-correlated stats from the gated artifact → sidecar; quantize auto EV to the 0.5 grid), C5' (1–5 on 0.5 grid both seats), C7 (evaluator+capture wrapper-owned, evaluator never writes files), C8 (never stop on PASS), C10' (axe floor is explicitly PARTIAL; human 43%-class findings are advisory change_requests, never floor keys), R-VISION (M1/inv 8), R-INJECTION (M2: page untrusted, the harness runs the pinned axe oracle (`run-axe.sh`) and the evaluator only reads its output, page text quarantined, gate/verdict/`weighted_total` recomputed deterministically by `recompute-gate.sh`), R-UNRENDERABLE (M3), R-NOVELTY (M4: perceptual diff over rendered shots), R-HEADLESS-FLOOR (M6), R-CONFIDENCE (M7: confidence advisory, removed from gating), X1' (wrapper-authoritative control: `run-harness.sh` itself checks the `AGENT_STOP` kill-file, read-inject-clears `STEER.md`, and commits per round — no PreToolUse hook scripts ship in this scaffold; the Stop hook remains an optional non-authoritative crash backstop), X2' (`weighted_total` single name, penalty-consistent example), X3' (only mode branch = which evaluator to invoke), X4' (`recommendation` enum = refine|pivot). All stand and are now *embodied in files*, not just prose.
 
 ---
 
@@ -54,6 +54,8 @@ project/
 ├── loop-config.yaml                [on disk] L7 caps/stop conditions (all unverified)
 ├── scripts/run-harness.sh          [on disk] L10/X wrapper + loop (SDK-less fallback)
 ├── scripts/capture-shots.sh        [on disk] shared pinned capture (NOT a seat)
+├── scripts/run-axe.sh              [on disk] pinned axe-core oracle → axe-<w>.json (machine floor keys)
+├── scripts/recompute-gate.sh       [on disk] deterministic gate/verdict/weighted_total recompute (R-INJECTION)
 ├── scripts/contact-sheet.sh        [on disk] L3 best-of-N montage
 ├── scripts/check-conformance.sh    [on disk] NEW: proves the contracts (§17)
 ├── scripts/validate-critique.sh    [on disk] NEW: jq-only schema fallback (ajv-compatible call shape)
@@ -71,10 +73,12 @@ project/
 │                                    (all three installed into the TARGET project's .claude/agents/
 │                                     by run-harness.sh at startup — the CLI discovers them there)
 └── runs/<run_id>/                  (created at runtime)
-    ├── RUN_MANIFEST.json events.jsonl scores.csv budgets.json STOP_REASON
+    ├── RUN_MANIFEST.json events.log scores.csv budgets.json.spent STOP_REASON
+    ├── live -> candidates/<cid>/round-<n>/build   (current-round symlink the harness serves)
     ├── NEXT_FINDINGS.json          THE baton (loop-read). NEXT_FINDINGS.md = derived mirror (never read).
     └── candidates/<cid>/round-<n>/
         ├── build/ shots/{1440,768,375}.png      (SHARED pinned capture)
+        ├── axe-{1440,768,375}.json               pinned axe-core results (machine floor keys)
         ├── critique-<k>.json                     gated, seat-blind, byte-identical
         ├── critique-<k>.audit.json               SIDECAR (loop-blind): EV, samples, stdev, eval_steps, bias, seat
         └── merged.json                           reconciliation → derives baton
@@ -117,6 +121,11 @@ L0 substrate (DTCG 2025.10 OKLCH, frozen primitives, seat-agnostic `check-confor
 - **C3 — both validate.** ajv when installed (authoritative); else the jq subset (`validate-critique.sh`: grid, four criteria, verdict/severity enums, UNRENDERABLE-only null rule, single-sourced seat-key ban). **The two disagree in both directions (§16#6); ajv governs in CI.**
 - **C4 — single FEEDBACK baton.** The generator's feedback comes only from `NEXT_FINDINGS.json`; its block references no `*.audit.json`, `NEXT_FINDINGS.md`, or deprecated `FINDINGS.md`. (It still legitimately reads DESIGN/BRIEF/tokens/`scores.csv` — those are inputs, not the feedback baton.)
 - **C5 — viewports pinned.** `capture-shots.sh` pins `[1440,900],[768,1024],[375,812]` and the schema's `viewports.items.enum == [1440,768,375]`. Shared pinned capture ⇒ both seats consume identical pixels within a run.
+- **C3b — enum enforcement in the jq fallback (adversarial regression).** The jq validator REJECTS an out-of-enum `change_request` severity and an out-of-enum verdict. (Regression: the severity check was originally a jq tautology that accepted anything.)
 - **C6 — rubric weight direction.** `weight_direction.verified == true`, assertion matches design+originality > craft+functionality, numeric weights satisfy `(0.35+0.35) > (0.20+0.10)`, and `_unverified` flags the numbers.
+- **C7 — auto seat startable.** `templates/mcp.json` ships version-pinned (`@playwright/mcp@<x.y.z>`) and `run-harness.sh` materializes it into the round dir before `--strict-mcp-config` reads it.
+- **C8 — runnable preconditions wired.** `run-harness.sh` installs the skill's `.claude/agents/` into the target project; the human seat renders `templates/REVIEW-SHEET.md` (with the fenced json block `human-seat-to-json.sh` extracts) and blocks for the filled sheet.
+
+Beyond the conformance script, `scripts/scripts.test.sh` unit-tests the pure transforms — including `recompute-gate.sh` restoring a deterministic NEEDS_WORK gate from a tampered PASS (the executable form of the R-INJECTION defense).
 
 This is the artifact the SHIP-CHECK re-runs; it converts the prose-only structural contracts into a reproducible pass/fail. It does **not** substitute for the empirical κ / validity gate (§16#1, #8).

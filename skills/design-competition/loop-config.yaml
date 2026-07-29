@@ -1,4 +1,10 @@
-# L7 control config. ALL numbers UNVERIFIED placeholders.
+# L7 control REFERENCE. The harness does NOT parse this file — it reads env vars
+# whose defaults mirror it: MODE, MAX_ROUNDS, MAX_BUDGET_USD, PLATEAU_WINDOW
+# (stop_conditions.plateau.window_k), SUPERVISE=1 (anti_fixation.supervisor).
+# Implemented in run-harness.sh: iter_cap, budget, plateau, STEER injection.
+# NOT implemented (design intent only): converged_exit, regression_gate, judge_noise
+# k-sampling/epsilon, novelty metrics; preconditions P2/P3 are asserted statically by
+# check-conformance.sh (C6) rather than at loop start. ALL numbers UNVERIFIED placeholders.
 mode: auto                 # auto | human  (selects evaluator at invocation only; X3')
 max_rounds: 12             # range 5-15 [V]; >15 ceiling unverified
 max_budget_usd: 25

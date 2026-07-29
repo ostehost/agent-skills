@@ -33,8 +33,7 @@ fi
 
 # 2. required top-level keys + const schema_version
 req='["schema_version","candidate_id","round","critique_index","viewports","rubric_ref","axe_core_version","scores","ai_slop_flags","quality_floor","change_requests","gate","verdict","weighted_total","recommendation"]'
-jq -e --argjson r "$req" 'all($r[]; . as $k | ($k|in(.))) // ([keys] as $x | ($r - ($x[0]))|length==0)' "$DOC" >/dev/null 2>&1 \
-  || jq -e --argjson r "$req" '($r - (keys))|length==0' "$DOC" >/dev/null || fail "missing required top-level key(s)"
+jq -e --argjson r "$req" '($r - keys)|length==0' "$DOC" >/dev/null || fail "missing required top-level key(s)"
 jq -e '.schema_version=="l6/3.0"' "$DOC" >/dev/null || fail "schema_version must be l6/3.0"
 
 # 3. verdict enum
@@ -53,7 +52,7 @@ if jq -e '.verdict!="UNRENDERABLE" and ([.scores[].score]|any(.==null))' "$DOC" 
 fi
 
 # 6. change_request severities + criteria enums
-jq -e '[.change_requests[]?.severity]|all(["blocker","major","medium","nitpick"]|index(.)!=null)' "$DOC" >/dev/null || fail "bad change_request severity"
+jq -e '[.change_requests[]?.severity]|all(. as $s | ["blocker","major","medium","nitpick"]|index($s)!=null)' "$DOC" >/dev/null || fail "bad change_request severity"
 jq -e --argjson c "$CRITERIA_JSON" '[.change_requests[]?.criterion]|all(. as $x | $c|index($x)!=null)' "$DOC" >/dev/null || fail "bad change_request criterion"
 
 # 7. viewports pinned to exactly [1440,768,375] (order-free)

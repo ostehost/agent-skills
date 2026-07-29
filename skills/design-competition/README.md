@@ -34,14 +34,16 @@ Only the evaluator seat swaps; everything else is shared. The seats are **struct
 | `templates/REVIEW-SHEET.md` | canonical blank human-seat form (rendered per round in Human mode) |
 | `scripts/run-harness.sh` | L10 loop entrypoint (`MODE=auto\|human`) |
 | `scripts/capture-shots.sh` | shared pinned screenshot capture @ 1440/768/375 |
+| `scripts/run-axe.sh` | pinned axe-core oracle → per-viewport `axe-<w>.json` (machine floor keys, both modes) |
+| `scripts/recompute-gate.sh` | deterministic gate/verdict/`weighted_total` recompute from `rubric.json` (R-INJECTION) |
 | `scripts/contact-sheet.sh` | L3 best-of-N contact sheet |
-| `loop-config.yaml` | L7 iteration caps / stop conditions (all caps unverified) |
+| `loop-config.yaml` | L7 caps / stop conditions reference (harness reads mirroring env vars) |
 | `scripts/check-conformance.sh` | **proves** the contracts connect (C1–C8) |
 | `scripts/validate-critique.sh` · `scripts/assert-evidence.sh` · `scripts/render-baton-md.sh` · `scripts/human-seat-to-json.sh` | helpers the loop calls |
 
 ## Verify it yourself
 ```sh
-scripts/check-conformance.sh   # C1, C2, C2b, C3–C8
+scripts/check-conformance.sh   # C1, C2, C2b, C3, C3b, C4–C8
 ```
 The checks prove **schema closure** (C1), **wrapper-canonicalization determinism on a staged payload**
 (C2 — *not* live-seat byte-identity), **closed seat channels** (C2b: jq rejects named seat keys, ajv
@@ -56,8 +58,11 @@ chief open risk below.
 ## Preconditions to run a real loop
 - A target git project **with at least one commit** (`run-harness.sh` derives its run id from `HEAD`,
   and the harness diffs/merges via git worktrees).
-- The candidate app already **served on `http://localhost:$PORT`** (default 4173) — the harness
-  captures and evaluates a live page; it does not start your dev server.
+- A page to evaluate on `http://localhost:$PORT` (default 4173). The harness keeps
+  `runs/<id>/live` symlinked at the **current round's** `build/` and, when nothing is already
+  listening on `$PORT`, static-serves that symlink itself — so both seats always score the round
+  that was just generated. If you run your own dev server on `$PORT` instead, it must serve the
+  current round's build (e.g. serve `runs/<id>/live`), or every round evaluates a stale page.
 - Subagents and the Auto-seat MCP config need **no manual setup**: `run-harness.sh` copies
   `.claude/agents/{generator,evaluator,supervisor}.md` into the target project's `.claude/agents/`
   at startup and `templates/mcp.json` (pinned `@playwright/mcp@0.0.78`, latest as of 2026-07-28)
@@ -67,10 +72,13 @@ chief open risk below.
   run — `GENERATOR_MODEL` always; `EVALUATOR_MODEL` in Auto mode (multimodal, family must differ
   from the generator's); `SUPERVISOR_MODEL` optional (defaults to the generator's). The wrapper
   fails fast if unset and records the chosen ids in `runs/<id>/RUN_MANIFEST.json`.
-- External deps for a live run: `npm i -g ajv-cli` (the scaffold calls it with **`--spec=draft2020`** —
-  required, or ajv rejects the 2020-12 schema wholesale), `brew install imagemagick`, `npx playwright
-  install chromium` (a pinned Playwright version for byte-stable screenshots). Scripts degrade with
-  clear errors and a jq-only validator fallback when these are absent.
+- External deps for a live run: in the **target project**, `npm i -D playwright axe-core` (the
+  `playwright` *library* powers `capture-shots.sh` and `run-axe.sh` in **both** modes — pin
+  `axe-core` to `rubric.json`'s `axe_core_version`) plus `npx playwright install chromium` (browser
+  build, byte-stable screenshots); globally, `npm i -g ajv-cli` (the scaffold calls it with
+  **`--spec=draft2020`** — required, or ajv rejects the 2020-12 schema wholesale) and
+  `brew install imagemagick` for contact sheets. Scripts degrade with clear errors and a jq-only
+  validator fallback when these are absent.
 - **ajv is authoritative** for schema validation; the jq fallback enforces only a load-bearing subset
   and disagrees with ajv in both directions — run ajv in CI. (Verified: with `--spec=draft2020`, ajv
   accepts a valid critique and rejects novel `per_criterion` keys, bad enums, and unknown top-level

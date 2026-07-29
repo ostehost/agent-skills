@@ -2,7 +2,11 @@
 # Shared pinned capture. Both seats cite these byte-identical screenshots as evidence.
 # Pin EVERYTHING that changes pixels: engine build, DPR, fonts, color-scheme, motion.
 set -euo pipefail
-URL="${1:?url}"; OUT="${2:?outdir}"; mkdir -p "$OUT"
+URL="${1:?url}"; OUT="${2:?outdir}"; WORKDIR="${3:-$PWD}"
+mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"
+# Resolve the pinned playwright library from the project under test, not from
+# wherever the harness happened to be launched.
+cd "$WORKDIR"
 # Heights are UNVERIFIED defaults; pin them so Auto and Human evidence match.
 node -e '
 const { chromium } = require("playwright");

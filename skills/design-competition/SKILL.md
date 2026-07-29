@@ -13,13 +13,15 @@ See the included `README.md` and `WORKFLOW.md` for detailed rules on how to run 
 ## Dependencies
 
 - **Required:** `jq`, `claude`, `git`
-- **Optional/contextual:** Playwright/MCP (for Auto mode), ImageMagick `montage` (for contact sheets), and `ajv` (for strict JSON schema validation).
+- **Optional/contextual:** the `playwright` + `axe-core` npm libraries in the target project (shared capture + machine floor keys, **both** modes), Playwright MCP (Auto-mode evaluator), ImageMagick `montage` (contact sheets), and `ajv` (strict JSON schema validation).
 
 ## Quick Start
 1. Provide a `DESIGN.md` and `BRIEF.yaml` in the target project root to define the L0/L1 intent
    (plus `tokens/primitives.tokens.json` for the frozen substrate).
-2. Check the preconditions: the target project is a git repo with **at least one commit**, and the
-   candidate app is being served at `http://localhost:$PORT` (default 4173) before the loop starts.
+2. Check the preconditions: the target project is a git repo with **at least one commit**. The
+   harness serves each round's build itself (via the `runs/<id>/live` symlink) unless something is
+   already listening on `http://localhost:$PORT` (default 4173) — a pre-existing server must serve
+   the current round's build.
 3. Run the loop from anywhere:
    `GENERATOR_MODEL=<model-id> MODE=auto PROJECT=/path/to/project scripts/run-harness.sh` (or `MODE=human`).
    `GENERATOR_MODEL` is always required (M1 model-id locking — the shipped agent files carry

@@ -206,8 +206,9 @@ to a **shared feedback file the generator reads next pass**.
   configuration, not a custom build — though it was still not *shipped inside*
   `cwc-long-running-agents` (M5). Loop = the bash round loop in `scripts/run-harness.sh` alternating
   generator/evaluator, writing the gated critique to the `NEXT_FINDINGS.json` baton; gating via
-  wrapper-side validation (`scripts/validate-critique.sh` / `scripts/assert-evidence.sh`, gate
-  recomputed deterministically) plus inline wrapper controls: the `AGENT_STOP` kill-file check, the
+  wrapper-side validation (`scripts/validate-critique.sh` / `scripts/assert-evidence.sh`, with
+  gate/verdict/`weighted_total` recomputed deterministically by `scripts/recompute-gate.sh`) plus
+  inline wrapper controls: the `AGENT_STOP` kill-file check, the
   `STEER.md` read-inject-clear, and the per-round commit. (No PreToolUse hook scripts ship in this
   scaffold — the upstream demo's `kill-switch.sh`/`steer.sh`/`commit-on-stop.sh` hook artifacts are
   replaced by these wrapper-side equivalents; see HARNESS §2 X1'.)

@@ -3,7 +3,7 @@
 # The loop NEVER reads the .md; this is human-only. Deterministic; no provenance leaked.
 set -euo pipefail
 J="${1:?NEXT_FINDINGS.json}"
-printf '<!-- DERIVED MIRROR of NEXT_FINDINGS.json. The loop NEVER reads this file. -->\n'
+printf '<!-- DERIVED MIRROR of NEXT_FINDINGS.json. The loop NEVER reads this file. Do not hand-edit. -->\n'
 printf '# NEXT_FINDINGS (human mirror)\n\n'
 printf '**verdict:** %s\n\n' "$(jq -r '.verdict' "$J")"
 printf '## change requests (evidence-bound)\n'
