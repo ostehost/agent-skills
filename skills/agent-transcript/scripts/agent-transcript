@@ -12,12 +12,12 @@ const DEFAULT_ENTRY_MAX_CHARS = 6000;
 
 function usage() {
   console.log(`Usage:
-  agent-transcript find --query TEXT [--cwd PATH] [--since-days N] [--max-files N] [--root PATH...]
+  agent-transcript find --query TEXT [--cwd PATH] [--since-days N] [--max-files N] [--limit N] [--scan-bytes N] [--root PATH...]
   agent-transcript render --session FILE [--app-server] [--thread-id ID] [--out FILE] [--max-chars N] [--entry-max-chars N] [--title TEXT] [--url URL]
   agent-transcript render-thread --thread-id ID [--out FILE] [--max-chars N] [--entry-max-chars N] [--title TEXT] [--url URL]
   agent-transcript preview --session FILE [--app-server] [--thread-id ID] [--out FILE] [--max-chars N] [--entry-max-chars N] [--title TEXT] [--url URL]
   agent-transcript append-body --body FILE --session FILE [--app-server] [--thread-id ID] [--out FILE] [--max-chars N] [--entry-max-chars N]
-  agent-transcript html --prs FILE [--out FILE] [--since-days N] [--min-score N] [--root PATH...] [--exclude-session FILE...]
+  agent-transcript html --prs FILE [--out FILE] [--cwd PATH] [--since-days N] [--min-score N] [--scan-bytes N] [--root PATH...] [--exclude-session FILE...]
 
 Local-only. No network calls.`);
 }
@@ -51,7 +51,16 @@ function asArray(value) {
 
 function optionNumber(options, camelName, kebabName, fallback) {
   const value = options[camelName] ?? options[kebabName] ?? fallback;
-  return Number(value);
+  if (value === true) throw new Error(`--${kebabName} requires a numeric value`);
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) throw new Error(`--${kebabName} must be a number`);
+  return parsed;
+}
+
+function optionString(options, kebabName) {
+  const value = options[kebabName];
+  if (value === true) throw new Error(`--${kebabName} requires a value`);
+  return value == null ? null : String(value);
 }
 
 function homePath(...parts) {
@@ -134,18 +143,26 @@ function walkJsonl(root, sinceMs, out = []) {
   return out;
 }
 
+// Oversized sessions keep the opening turns (the original ask) plus the newest
+// tail (the work being published) and mark the gap, instead of silently
+// reflecting only the session's oldest activity.
 function readJsonl(file, maxLines = 12000) {
-  const text = fs.readFileSync(file, "utf8");
-  const lines = text.split(/\n+/).filter(Boolean).slice(0, maxLines);
-  const rows = [];
-  for (const line of lines) {
+  const lines = fs.readFileSync(file, "utf8").split(/\n+/).filter(Boolean);
+  const parse = (line) => {
     try {
-      rows.push(JSON.parse(line));
+      return JSON.parse(line);
     } catch {
-      rows.push({ type: "unparsed", text: line });
+      return { type: "unparsed", text: line };
     }
-  }
-  return rows;
+  };
+  if (lines.length <= maxLines) return lines.map(parse);
+  const headKeep = Math.floor(maxLines / 6);
+  const omitted = lines.length - maxLines;
+  return [
+    ...lines.slice(0, headKeep).map(parse),
+    { type: "session_gap", omitted },
+    ...lines.slice(headKeep + omitted).map(parse),
+  ];
 }
 
 function sessionThreadId(file) {
@@ -163,7 +180,6 @@ function stringContent(value) {
     if (typeof value.content === "string") return value.content;
     if (typeof value.message === "string") return value.message;
     if (Array.isArray(value.content)) return stringContent(value.content);
-    if (value.type === "text" && value.text) return String(value.text);
   }
   return "";
 }
@@ -232,20 +248,47 @@ function eventRole(row) {
   if (row?.type === "assistant") return "assistant";
   if (row?.message?.role === "user") return "user";
   if (row?.message?.role === "assistant") return "assistant";
-  if (row?.type === "tool_result" || row?.type === "tool_use") return "tool";
+  if (row?.type === "tool_result") return "tool_output";
+  if (row?.type === "tool_use") return "tool";
   return null;
 }
 
+// Claude-style rows nest dialogue and tool traffic as blocks inside
+// message.content; split them so tool_use/tool_result hit the tool pipeline
+// instead of leaking raw tool output through stringContent.
+function expandMessageContentBlocks(row) {
+  const role = row?.message?.role;
+  const content = row?.message?.content;
+  if ((role !== "user" && role !== "assistant") || !Array.isArray(content)) return null;
+  const events = [];
+  const textParts = [];
+  for (const block of content) {
+    if (typeof block === "string") textParts.push(block);
+    else if (block?.type === "tool_use") events.push({ type: "tool_use", name: block.name, input: block.input });
+    else if (block?.type === "tool_result") events.push({ type: "tool_result" });
+    else if (block?.type === "text" && typeof block.text === "string") textParts.push(block.text);
+    // thinking and any other block types stay out of the public transcript
+  }
+  const text = textParts.filter(Boolean).join("\n");
+  if (text) events.push({ type: role, text });
+  return events;
+}
+
+// Strong markers are unambiguous system-prompt/config dumps. Weak markers
+// (mentioning AGENTS.md or "your instructions") also occur in ordinary task
+// dialogue, so they only count when the entry is blob-sized — otherwise a
+// user asking to edit AGENTS.md would have their whole prompt blanked.
 function hasSetupBlob(text) {
-  return (
+  if (
     text.includes("<INSTRUCTIONS>") ||
     text.includes("# AGENTS.MD") ||
     text.includes("Knowledge cutoff:") ||
     text.includes("You are Codex") ||
-    /\byour instructions\b/i.test(text) ||
-    /\binstructions absorbed\b/i.test(text) ||
-    /\bAGENTS\.md\b/i.test(text)
-  );
+    /\binstructions absorbed\b/i.test(text)
+  ) {
+    return true;
+  }
+  return text.length > 4000 && (/\byour instructions\b/i.test(text) || /\bAGENTS\.md\b/i.test(text));
 }
 
 // Shape rules whose replacement fully replaces the matched secret, so re-testing
@@ -259,7 +302,15 @@ const REDACT_SHAPE_RULES = [
   [/eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}/g, "[REDACTED_JWT]"],
   [/\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{16,}/gi, "[REDACTED_AUTH_HEADER]"],
   [/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[REDACTED_EMAIL]"],
-  [/\b(?:\+?\d[\d .()-]{7,}\d)\b/g, "[REDACTED_PHONE]"],
+  // Phone shapes need separator-grouped digits, a + international form, a
+  // bare NANP shape (optional 1, then an area code starting 2-9), or a bare
+  // national form with a leading trunk 0 — so ISO dates, epoch timestamps
+  // (which start with 1), and long issue/run ids survive; a leading lookahead
+  // skips bare YYYY-MM-DD dates outright.
+  [
+    /(?<![\d-])(?!\d{4}-\d{2}-\d{2}(?![.\d-]))(?:(?:\+\d{1,3}[ .-]?)?\(\d{2,4}\)[ .-]?\d{2,4}(?:[ .-]\d{2,4}){1,3}|(?:\+\d{1,3}[ .-]?)?\d{2,4}(?:[ .-]\d{2,4}){2,4}|(?:1[ .-]?)?[2-9]\d{2}[ .-]?\d{3}[ .-]?\d{4}|0\d{9,12}|\+\d{9,14})(?![\d-])/g,
+    "[REDACTED_PHONE]",
+  ],
   [/\/Users\/[^\s`"'>)]+/g, "[LOCAL_PATH]"],
   [/\/home\/[^\s`"'>)]+/g, "[LINUX_HOME_PATH]"],
   [/~\/[^\s`"'>)]+/g, "[HOME_PATH]"],
@@ -276,9 +327,10 @@ const QUERY_SECRET_PARAM_RULE = [
 function redact(input, stats) {
   let s = String(input ?? "");
   for (const [re, repl] of [...REDACT_SHAPE_RULES, QUERY_SECRET_PARAM_RULE]) {
-    const before = s;
+    const matches = s.match(re);
+    if (!matches) continue;
     s = s.replace(re, repl);
-    if (s !== before) stats.redactions++;
+    stats.redactions += matches.length;
   }
   return s;
 }
@@ -349,7 +401,7 @@ function toolFamily(name) {
   if (/(exec|command|shell|run|test|build|lint|format|install|pnpm|npm|node|git|gh|ssh)/.test(normalized)) {
     return "execute";
   }
-  if (/(web|http|fetch|browser|chrome|github|dropbox|notion|gmail|calendar)/.test(normalized)) {
+  if (/(web|http|browser|chrome|github|dropbox|notion|gmail|calendar)/.test(normalized)) {
     return "network";
   }
   return "other";
@@ -377,10 +429,11 @@ function shellFamily(command) {
 
 function toolCallFamily(row) {
   const name = row.payload?.name || row.name || row.message?.name || row.type || "tool";
-  if (name === "exec_command") {
+  if (name === "exec_command" || name === "Bash") {
+    const rawArgs = row.payload?.arguments ?? row.input;
     try {
-      const args = JSON.parse(row.payload?.arguments || "{}");
-      return shellFamily(args.cmd);
+      const parsed = typeof rawArgs === "string" ? JSON.parse(rawArgs || "{}") : rawArgs || {};
+      return shellFamily(parsed.cmd ?? parsed.command);
     } catch {
       return "execute";
     }
@@ -391,12 +444,8 @@ function toolCallFamily(row) {
 }
 
 function compactToolSummary(familyCounts, dropped) {
-  const families = new Map();
-  for (const [family, count] of familyCounts.entries()) {
-    families.set(family, (families.get(family) || 0) + count);
-  }
   const ordered = ["read", "write", "execute", "network", "other"]
-    .map((family) => [family, families.get(family) || 0])
+    .map((family) => [family, familyCounts.get(family) || 0])
     .filter(([, count]) => count > 0)
     .map(([family, count]) => `${count} ${family}`);
   const calls = ordered.length ? ordered.join(", ") : "0 tool";
@@ -419,7 +468,12 @@ function finalizeTranscript(items, stats, options) {
   const maxChars = optionNumber(options, "maxChars", "max-chars", DEFAULT_MAX_CHARS);
   let joined = renderedItems.join("\n\n");
   if (joined.length > maxChars) {
-    joined = `${joined.slice(0, maxChars).trimEnd()}\n\n...[transcript truncated to ${maxChars} chars]`;
+    // Keep both ends: the opening turns carry the original ask and the tail
+    // carries the newest work being published; dropping the middle instead of
+    // the tail keeps the transcript's conclusion visible.
+    const headChars = Math.floor(maxChars / 3);
+    const tailChars = maxChars - headChars;
+    joined = `${joined.slice(0, headChars).trimEnd()}\n\n...[transcript truncated to ${maxChars} chars; middle omitted]...\n\n${joined.slice(joined.length - tailChars).trimStart()}`;
   }
   // Redact the header before the safety check, not after: unsafe() now shares
   // redact()'s shape rules, so checking the raw title/url would fail closed on
@@ -430,26 +484,36 @@ function finalizeTranscript(items, stats, options) {
   return { joined, headerBits, unsafeAfter, safe };
 }
 
+// Fence must be strictly longer than any backtick run inside the fenced
+// content, or transcript text escapes the code block (markdown injection into
+// the PR body).
+function fenceFor(text) {
+  const longest = (text.match(/`+/g) || []).reduce((max, run) => Math.max(max, run.length), 0);
+  return "`".repeat(Math.max(4, longest + 1));
+}
+
 // Shared markdown template for renderSession/renderThread; `extraLines` carries
 // the one field that varies beyond the source label (renderThread's `thread:` id).
 // `headerBits` is already redacted by finalizeTranscript.
 function buildMarkdown({ sourceLabel, extraLines = [], summaryLabel, headerBits, joined, stats }) {
   const summarySuffix = headerBits ? `: ${headerBits}` : "";
   const extra = extraLines.length ? `${extraLines.join("\n")}\n` : "";
+  const fenced = `source: ${sourceLabel}
+${extra}redaction: local paths, emails, phone-shaped strings, token-shaped strings, auth headers, auth query params
+omitted: raw tool outputs, system/developer prompts, local paths, secrets, browser/session/auth details
+stats: ${JSON.stringify(stats)}
+
+${joined}`;
+  const fence = fenceFor(fenced);
   return `${MARKER_START}
 ## Agent Transcript
 
 <details>
 <summary>Redacted ${summaryLabel}${summarySuffix}</summary>
 
-\`\`\`\`text
-source: ${sourceLabel}
-${extra}redaction: local paths, emails, phone-shaped strings, token-shaped strings, auth headers, auth query params
-omitted: raw tool outputs, system/developer prompts, local paths, secrets, browser/session/auth details
-stats: ${JSON.stringify(stats)}
-
-${joined}
-\`\`\`\`
+${fence}text
+${fenced}
+${fence}
 
 </details>
 ${MARKER_END}
@@ -490,8 +554,17 @@ function renderSession(file, options = {}) {
     const type = row?.type === "event_msg" ? row.payload?.type : null;
     return type === "user_message" || type === "agent_message";
   });
-  const renderRows = rows.flatMap((row) => [row, ...expandCompactedReplacementItems(row)]);
+  const renderRows = rows.flatMap((row) => {
+    const blocks = expandMessageContentBlocks(row);
+    return blocks ?? [row, ...expandCompactedReplacementItems(row)];
+  });
   for (const row of renderRows) {
+    if (row?.type === "session_gap") {
+      items.push(`[gap]\n[${row.omitted} session lines omitted to bound transcript size]`);
+      stats.sessionLinesOmitted = row.omitted;
+      stats.entries++;
+      continue;
+    }
     const role = eventRole(row);
     if (!role) continue;
     if (hasEventDialogue && row.type === "response_item" && (role === "user" || role === "assistant")) {
@@ -749,7 +822,7 @@ function recentFiles(files, maxFiles) {
 }
 
 function candidateFiles(roots, sinceMs, options = {}) {
-  return recentFiles(roots.flatMap((root) => walkJsonl(root, sinceMs)), Number(options["max-files"] || 400));
+  return recentFiles(roots.flatMap((root) => walkJsonl(root, sinceMs)), optionNumber(options, "maxFiles", "max-files", 400));
 }
 
 // Whole URLs are re-appended so they score as one term as well as via their
@@ -763,30 +836,31 @@ function queryTerms(query) {
 }
 
 function findSessions(options) {
-  const sinceDays = Number(options["since-days"] || 14);
+  const sinceDays = optionNumber(options, "sinceDays", "since-days", 14);
   const sinceMs = Date.now() - sinceDays * 24 * 60 * 60 * 1000;
   const roots = asArray(options.root).length ? asArray(options.root) : defaultRoots();
   const query = String(options.query || "");
   const terms = queryTerms(query);
   const files = candidateFiles(roots, sinceMs, options);
-  const scanBytes = Number(options["scan-bytes"] || 60000);
+  const scanBytes = optionNumber(options, "scanBytes", "scan-bytes", 60000);
+  const cwd = optionString(options, "cwd");
   const results = files
-    .map((file) => scoreScanRecord(sessionScanRecord(file, scanBytes), terms, options.cwd))
+    .map((file) => scoreScanRecord(sessionScanRecord(file, scanBytes), terms, cwd))
     .filter((result) => result.score > 0)
     .sort((a, b) => b.score - a.score || b.mtime.localeCompare(a.mtime))
-    .slice(0, Number(options.limit || 10));
+    .slice(0, optionNumber(options, "limit", "limit", 10));
   return results;
 }
 
 function sessionScanRecords(options) {
-  const sinceDays = Number(options["since-days"] || 14);
+  const sinceDays = optionNumber(options, "sinceDays", "since-days", 14);
   const sinceMs = Date.now() - sinceDays * 24 * 60 * 60 * 1000;
   const roots = asArray(options.root).length ? asArray(options.root) : defaultRoots();
   const excluded = new Set(asArray(options["exclude-session"]).map((file) => path.resolve(file)));
   return roots
     .flatMap((root) => walkJsonl(root, sinceMs))
     .filter((file) => !excluded.has(path.resolve(file)))
-    .map((file) => sessionScanRecord(file, Number(options["scan-bytes"] || 90000)));
+    .map((file) => sessionScanRecord(file, optionNumber(options, "scanBytes", "scan-bytes", 90000)));
 }
 
 function replaceSection(body, section) {
@@ -795,7 +869,10 @@ function replaceSection(body, section) {
   if (start !== -1 && end !== -1 && end > start) {
     return `${body.slice(0, start).trimEnd()}\n\n${section.trim()}\n\n${body.slice(end + MARKER_END.length).trimStart()}`;
   }
-  return `${body.trimEnd()}\n\n${section.trim()}\n`;
+  // Stray or reversed markers (hand-edited body): strip them before appending,
+  // so a later run can't splice real body content between stale markers.
+  const cleaned = body.split(MARKER_START).join("").split(MARKER_END).join("");
+  return `${cleaned.trimEnd()}\n\n${section.trim()}\n`;
 }
 
 function escapeHtml(text) {
@@ -892,14 +969,15 @@ async function main() {
     if (!args.prs) throw new Error("--prs is required");
     const records = [];
     const scanRecords = sessionScanRecords(args);
-    const minScore = Number(args["min-score"] || 50);
+    const minScore = optionNumber(args, "minScore", "min-score", 50);
+    const cwd = optionString(args, "cwd");
     for (const pr of readPrs(args.prs)) {
       const query = [pr.url, pr.number ? `#${pr.number}` : "", pr.number, pr.title, pr.headRefName || pr.branch]
         .filter(Boolean)
         .join(" ");
       const terms = queryTerms(query);
       const [candidate] = scanRecords
-        .map((record) => scoreScanRecord(record, terms, args.cwd))
+        .map((record) => scoreScanRecord(record, terms, cwd))
         .filter((result) => result.score >= minScore)
         .sort((a, b) => b.score - a.score || b.mtime.localeCompare(a.mtime));
       if (!candidate) {

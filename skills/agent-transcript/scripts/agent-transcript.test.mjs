@@ -91,6 +91,144 @@ test("render drops raw tool outputs but keeps a compact tool summary", () => {
   assert.doesNotMatch(output, /sk-abcdefghijklmnopqrstuvwxyz123456/);
 });
 
+test("render drops Claude-format tool_result blocks and counts nested tool_use calls", () => {
+  const dir = tempDir();
+  const session = path.join(dir, "session.jsonl");
+  writeJsonl(session, [
+    { type: "user", message: { role: "user", content: [{ type: "text", text: "Fix the login bug." }] } },
+    {
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Searching for the failing code." },
+          { type: "tool_use", name: "Bash", input: { command: "rg loginBug src/" } },
+        ],
+      },
+    },
+    {
+      type: "user",
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", content: [{ type: "text", text: "db_password=hunter2secretvalue" }] }],
+      },
+    },
+  ]);
+
+  const output = run(["render", "--session", session]);
+  assert.doesNotMatch(output, /hunter2secretvalue/);
+  assert.match(output, /tool summary/);
+  assert.match(output, /1 read/);
+  assert.match(output, /raw tool outputs dropped: 1/);
+  assert.match(output, /"toolCalls":1/);
+  assert.match(output, /Searching for the failing code\./);
+});
+
+test("render lengthens the fence when transcript text contains backtick runs", () => {
+  const dir = tempDir();
+  const session = path.join(dir, "session.jsonl");
+  writeJsonl(session, [
+    {
+      type: "response_item",
+      payload: { role: "user", content: [{ type: "text", text: "Fence break attempt:\n````markdown\ninjected\n````" }] },
+    },
+  ]);
+
+  const output = run(["render", "--session", session]);
+  assert.match(output, /^`{5}text$/m, "opening fence must outgrow the content's 4-backtick run");
+  assert.match(output, /^`{5}$/m, "closing fence must match the widened opening fence");
+});
+
+test("render keeps ISO dates and long ids but still redacts phone numbers", () => {
+  const dir = tempDir();
+  const session = path.join(dir, "session.jsonl");
+  writeJsonl(session, [
+    {
+      type: "response_item",
+      payload: {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: "Deadline is 2026-07-29 for issue 1234567890; call +1 (555) 123-4567, 555-123-4567, 5551234567, or 07123456789.",
+          },
+        ],
+      },
+    },
+  ]);
+
+  const output = run(["render", "--session", session]);
+  assert.match(output, /2026-07-29/);
+  assert.match(output, /1234567890/);
+  assert.match(output, /\[REDACTED_PHONE\]/);
+  assert.doesNotMatch(output, /555/);
+});
+
+test("render keeps short dialogue that merely mentions AGENTS.md", () => {
+  const dir = tempDir();
+  const session = path.join(dir, "session.jsonl");
+  writeJsonl(session, [
+    {
+      type: "response_item",
+      payload: {
+        role: "user",
+        content: [{ type: "text", text: "Please add a build section to AGENTS.md and fix the failing test." }],
+      },
+    },
+    {
+      type: "response_item",
+      payload: { role: "assistant", content: [{ type: "text", text: "<INSTRUCTIONS> full policy dump here" }] },
+    },
+  ]);
+
+  const output = run(["render", "--session", session]);
+  assert.match(output, /add a build section to AGENTS\.md/);
+  assert.match(output, /\[instructions recap omitted/);
+});
+
+test("render counts every redaction match, not just rules fired", () => {
+  const dir = tempDir();
+  const session = path.join(dir, "session.jsonl");
+  writeJsonl(session, [
+    {
+      type: "response_item",
+      payload: { role: "user", content: [{ type: "text", text: "Mail one@example.com and two@example.com." }] },
+    },
+  ]);
+
+  const output = run(["render", "--session", session]);
+  assert.match(output, /"redactions":2/);
+});
+
+test("render keeps the newest turns of an oversized session and marks the gap", () => {
+  const dir = tempDir();
+  const session = path.join(dir, "session.jsonl");
+  const rows = [];
+  for (let i = 0; i < 12500; i++) {
+    rows.push({ type: "response_item", payload: { role: "user", content: [{ type: "text", text: `turn-${i}` }] } });
+  }
+  writeJsonl(session, rows);
+
+  const output = run(["render", "--session", session]);
+  assert.match(output, /"sessionLinesOmitted":500/);
+  assert.match(output, /transcript truncated to 50000 chars; middle omitted/);
+  assert.match(output, /turn-12499/, "newest turn must survive both line and char truncation");
+  assert.match(output, /turn-0\b/, "opening turn must survive both line and char truncation");
+});
+
+test("dangling value flags fail with a usage error instead of misbehaving", () => {
+  const dir = tempDir();
+  const session = path.join(dir, "session.jsonl");
+  writeJsonl(session, [
+    { type: "response_item", payload: { role: "user", content: [{ type: "text", text: "Fix the bug." }] } },
+  ]);
+
+  const maxChars = runFailure(["render", "--session", session, "--max-chars"]);
+  assert.match(maxChars.stderr, /--max-chars requires a numeric value/);
+  const cwd = runFailure(["find", "--query", "anything-here", "--cwd"]);
+  assert.match(cwd.stderr, /--cwd requires a value/);
+});
+
 test("append-body replaces an existing transcript section", () => {
   const dir = tempDir();
   const session = path.join(dir, "session.jsonl");
@@ -109,6 +247,21 @@ test("append-body replaces an existing transcript section", () => {
   assert.match(output, /New scoped work/);
   assert.doesNotMatch(output, /old transcript/);
   assert.equal((output.match(/agent-transcript:start/g) || []).length, 1);
+});
+
+test("append-body strips stray markers instead of splicing later content", () => {
+  const dir = tempDir();
+  const session = path.join(dir, "session.jsonl");
+  const body = path.join(dir, "body.md");
+  writeJsonl(session, [
+    { type: "response_item", payload: { role: "user", content: [{ type: "text", text: "New scoped work." }] } },
+  ]);
+  fs.writeFileSync(body, "# PR\n\n<!-- agent-transcript:end -->\nreal body content\n<!-- agent-transcript:start -->\n");
+
+  const output = run(["append-body", "--body", body, "--session", session]);
+  assert.match(output, /real body content/);
+  assert.equal((output.match(/agent-transcript:start/g) || []).length, 1);
+  assert.equal((output.match(/agent-transcript:end/g) || []).length, 1);
 });
 
 test("render fails closed when an unsafe title survives redaction", () => {
