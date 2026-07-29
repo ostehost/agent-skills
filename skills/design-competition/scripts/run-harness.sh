@@ -155,9 +155,12 @@ for ((n=0; n<MAX_ROUNDS; n++)); do
     CAPTURE_OK=0
   fi
   if [ "$CAPTURE_OK" = 1 ]; then
-    # Pinned axe-core oracle (machine floor keys; evaluator reads axe-*.json, never runs page JS).
+    # Pinned axe-core oracle (machine floor keys; evaluator reads axe-*.json, never
+    # runs page JS). The installed axe-core must match rubric.json's pin (M5) — on
+    # mismatch or failure no axe files exist and the floor fails closed downstream.
     "$SKILL_DIR/scripts/run-axe.sh" "http://localhost:$PORT" "$RD" "$PROJECT" \
-      || log "round $n axe run failed (floor keys fail closed for the evaluator)"
+      "$(jq -r '.axe_core_version' "$SKILL_DIR/rubric.json")" \
+      || log "round $n axe run failed/version-mismatch (floor keys fail closed)"
   fi
 
   # --- EVALUATOR (the ONLY mode branch: pick which seat to invoke) ---
@@ -201,20 +204,13 @@ for ((n=0; n<MAX_ROUNDS; n++)); do
   if [ ! -s "$OUT" ] || ! validate_json "$SCHEMA" "$OUT"; then
     log "round $n invalid critique -> UNRENDERABLE seed"; unrenderable_seed "$n" > "$OUT"
   fi
-  # Fail-closed floor (R-HEADLESS-FLOOR): the axe-sourced floor keys are machine
-  # facts. If the oracle produced no axe-<w>.json for a viewport, no seat may claim
-  # them true — force them false HERE, not just in evaluator prompt text.
-  for w in 1440 768 375; do
-    if [ ! -f "$RD/axe-$w.json" ]; then
-      jq ".quality_floor.responsive_$w=false | .quality_floor.visible_keyboard_focus=false | .quality_floor.contrast_AA_4_5=false" \
-        "$OUT" > "$OUT.tmp" && mv "$OUT.tmp" "$OUT"
-      log "round $n axe-$w.json missing -> viewport $w floor keys forced false"
-    fi
-  done
-  # Deterministic gate: per_criterion, floor_breaches, blocking count, weighted_total,
-  # and verdict are RECOMPUTED from rubric.json — a prompt-injected evaluator cannot
-  # award itself a PASS (R-INJECTION; see HARNESS §16-17).
-  "$SKILL_DIR/scripts/recompute-gate.sh" "$OUT" "$SKILL_DIR/rubric.json" > "$OUT.tmp" \
+  # Deterministic gate (R-INJECTION + R-HEADLESS-FLOOR): per_criterion, the
+  # axe-sourced floor keys (missing axe-<w>.json → forced false; recorded
+  # violations → downgraded; evaluator can never raise them past the oracle),
+  # floor_breaches, blocking count, weighted_total, and verdict are RECOMPUTED
+  # from rubric.json + the round's axe output — a prompt-injected evaluator
+  # cannot award itself a PASS (see HARNESS §16-17).
+  "$SKILL_DIR/scripts/recompute-gate.sh" "$OUT" "$SKILL_DIR/rubric.json" "$RD" > "$OUT.tmp" \
     && mv "$OUT.tmp" "$OUT" || { log "round $n recompute-gate failed"; stop error; }
   "$SKILL_DIR/scripts/assert-evidence.sh" "$OUT" "$RD" "$PROJECT" || stop error   # evidence files must exist on disk
   # sidecar provenance (loop-blind): wrapper records seat + any auto-only stats here, never in $OUT

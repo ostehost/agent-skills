@@ -103,6 +103,20 @@ optional_floor="$(jq '.quality_floor.visible_keyboard_focus=true | .quality_floo
 check_success "recompute-gate ignores the optional reduced_motion floor key when gating" \
   jq -e '.gate.floor_breaches==[]' <<<"$optional_floor"
 
+AXE_RD="$TMP/axe-round"; mkdir -p "$AXE_RD"
+all_true_floor="$(jq '.quality_floor={responsive_1440:true, responsive_768:true, responsive_375:true, visible_keyboard_focus:true, contrast_AA_4_5:true}' "$tampered")"
+no_axe="$("$DIR/recompute-gate.sh" <(printf '%s' "$all_true_floor") "$DIR/../rubric.json" "$AXE_RD")"
+check_success "recompute-gate forces axe floor keys false when axe output is missing" \
+  jq -e '.quality_floor.contrast_AA_4_5==false and .quality_floor.responsive_1440==false
+         and (.gate.floor_breaches|length)==5 and .verdict=="NEEDS_WORK"' <<<"$no_axe"
+for w in 1440 768 375; do
+  jq -n '{axe_core_version:"4.12.1", viewport:'"$w"', violations:[{id:"color-contrast"}]}' > "$AXE_RD/axe-$w.json"
+done
+with_axe="$("$DIR/recompute-gate.sh" <(printf '%s' "$all_true_floor") "$DIR/../rubric.json" "$AXE_RD")"
+check_success "recompute-gate downgrades evaluator floor booleans contradicted by axe violations" \
+  jq -e '.quality_floor.contrast_AA_4_5==false and .quality_floor.responsive_1440==true
+         and .gate.floor_breaches==["contrast_AA_4_5"] and .axe_core_version=="4.12.1"' <<<"$with_axe"
+
 # ---- render-baton-md.sh -------------------------------------------------------
 
 baton="$TMP/NEXT_FINDINGS.json"

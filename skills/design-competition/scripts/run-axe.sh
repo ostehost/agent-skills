@@ -6,14 +6,20 @@
 # page-suggested JS (R-INJECTION). Missing output files mean the floor keys fail
 # closed for that viewport.
 set -euo pipefail
-URL="${1:?url}"; OUT="${2:?outdir}"; WORKDIR="${3:-$PWD}"
+URL="${1:?url}"; OUT="${2:?outdir}"; WORKDIR="${3:-$PWD}"; EXPECTED_VERSION="${4:-}"
 mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"
 cd "$WORKDIR"
 node -e '
 const { chromium } = require("playwright");
 const axe = require("axe-core");
 const fs = require("fs");
-const url = process.argv[1], out = process.argv[2];
+const url = process.argv[1], out = process.argv[2], expected = process.argv[3] || "";
+const installed = require("axe-core/package.json").version;
+if (expected && installed !== expected) {
+  // The pin IS the contract (M5): a different ruleset invalidates every floor key.
+  console.error(`AXE_VERSION_MISMATCH installed=${installed} expected=${expected}`);
+  process.exit(4);
+}
 const vps = [[1440,900],[768,1024],[375,812]];
 (async () => {
   const browser = await chromium.launch({ headless: true });
@@ -38,4 +44,4 @@ const vps = [[1440,900],[768,1024],[375,812]];
   }
   await browser.close();
 })().catch(e => { console.error("AXE_FAILED", e.message); process.exit(3); });
-' "$URL" "$OUT"
+' "$URL" "$OUT" "$EXPECTED_VERSION"

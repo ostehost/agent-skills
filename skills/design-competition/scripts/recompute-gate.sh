@@ -1,18 +1,49 @@
 #!/usr/bin/env bash
 # R-INJECTION defense: deterministically recompute a validated critique's gate
-# fields from rubric.json, so a prompt-injected (or merely sloppy) evaluator can
-# never award itself a PASS. Model-authored scores, rationales, floor booleans,
-# slop flags, and change_requests are kept verbatim; everything derivable is
-# overwritten: gate.per_criterion (score >= rubric threshold), gate.floor_breaches
-# (false floor keys — only the rubric's required quality_floor keys gate; optional
-# house-rule keys like reduced_motion_respected are advisory),
-# gate.blocking_change_requests (severity==blocker count),
-# weighted_total (rubric weights minus capped slop penalties; null if
-# UNRENDERABLE), and verdict (UNRENDERABLE if declared or any score is null;
-# NEEDS_WORK on any gate failure, floor breach, or blocker; else PASS).
+# fields from rubric.json (and, when AXE_DIR is given, the pinned axe oracle's
+# output), so a prompt-injected (or merely sloppy) evaluator can never award
+# itself a PASS. Model-authored scores, rationales, slop flags, and
+# change_requests are kept verbatim; everything derivable is overwritten:
+#   - quality_floor (axe-sourced keys): AND-ed with the oracle evidence — a
+#     missing axe-<w>.json forces that viewport's axe floor keys false (fail
+#     closed), a present file downgrades keys contradicted by recorded
+#     violations, and axe_core_version is stamped from the oracle output. The
+#     evaluator can lower a floor key, never raise one past the oracle.
+#   - gate.per_criterion (score >= rubric threshold), gate.floor_breaches
+#     (required rubric floor keys only — optional house-rule keys like
+#     reduced_motion_respected are advisory), gate.blocking_change_requests
+#     (severity==blocker count), weighted_total (rubric weights minus capped
+#     slop penalties; null if UNRENDERABLE), and verdict (UNRENDERABLE if
+#     declared or any score is null; NEEDS_WORK on any gate failure, floor
+#     breach, or blocker; else PASS).
 # Emits the recomputed critique on stdout.
 set -euo pipefail
-DOC="${1:?critique json}"; RUBRIC="${2:?rubric.json}"
+DOC="${1:?critique json}"; RUBRIC="${2:?rubric.json}"; AXE_DIR="${3:-}"
+
+CRITIQUE="$(cat "$DOC")"
+
+if [ -n "$AXE_DIR" ]; then
+  for w in 1440 768 375; do
+    axe_file="$AXE_DIR/axe-$w.json"
+    if [ ! -f "$axe_file" ]; then
+      CRITIQUE="$(jq ".quality_floor.responsive_$w=false
+        | .quality_floor.visible_keyboard_focus=false
+        | .quality_floor.contrast_AA_4_5=false" <<<"$CRITIQUE")"
+    else
+      # Downgrade-only merge: axe violations are machine facts the evaluator
+      # cannot overrule upward. Focus-reachability rules approximate the
+      # keyboard-focus floor (axe cannot fully verify focus VISIBILITY — the
+      # floor is explicitly PARTIAL, see rubric _floor_note).
+      CRITIQUE="$(jq --slurpfile axe "$axe_file" '
+        ([$axe[0].violations[]?.id]) as $v
+        | (if ($v | index("color-contrast")) != null then .quality_floor.contrast_AA_4_5 = false else . end)
+        | (if ([$v[] | select(IN("focus-order-semantics","frame-focusable-content","scrollable-region-focusable","tabindex"))] | length) > 0
+           then .quality_floor.visible_keyboard_focus = false else . end)
+        | (if ($axe[0].axe_core_version | type) == "string" then .axe_core_version = $axe[0].axe_core_version else . end)
+      ' <<<"$CRITIQUE")"
+    fi
+  done
+fi
 
 jq --slurpfile rubric "$RUBRIC" '
   $rubric[0] as $r
@@ -39,4 +70,4 @@ jq --slurpfile rubric "$RUBRIC" '
             or (.gate.blocking_change_requests > 0))
       then "NEEDS_WORK"
       else "PASS" end)
-' "$DOC"
+' <<<"$CRITIQUE"
