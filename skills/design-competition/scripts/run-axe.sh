@@ -8,6 +8,10 @@
 set -euo pipefail
 URL="${1:?url}"; OUT="${2:?outdir}"; WORKDIR="${3:-$PWD}"; EXPECTED_VERSION="${4:-}"
 mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"
+# Clear prior artifacts BEFORE the version check: a failed/mismatched rerun must
+# leave no stale axe-<w>.json behind for recompute-gate to mistake for current
+# oracle evidence (each surviving file must come from THIS invocation).
+rm -f "$OUT/axe-1440.json" "$OUT/axe-768.json" "$OUT/axe-375.json"
 cd "$WORKDIR"
 node -e '
 const { chromium } = require("playwright");
