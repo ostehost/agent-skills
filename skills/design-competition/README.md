@@ -62,6 +62,11 @@ chief open risk below.
   `.claude/agents/{generator,evaluator,supervisor}.md` into the target project's `.claude/agents/`
   at startup and `templates/mcp.json` (pinned `@playwright/mcp@0.0.78`, latest as of 2026-07-28)
   into each round dir before invoking the evaluator.
+- **Model ids are required env** (M1 model-id locking): the shipped agent files carry
+  `REPLACE_WITH_*` placeholders and the wrapper materializes them into the installed copies per
+  run — `GENERATOR_MODEL` always; `EVALUATOR_MODEL` in Auto mode (multimodal, family must differ
+  from the generator's); `SUPERVISOR_MODEL` optional (defaults to the generator's). The wrapper
+  fails fast if unset and records the chosen ids in `runs/<id>/RUN_MANIFEST.json`.
 - External deps for a live run: `npm i -g ajv-cli` (the scaffold calls it with **`--spec=draft2020`** —
   required, or ajv rejects the 2020-12 schema wholesale), `brew install imagemagick`, `npx playwright
   install chromium` (a pinned Playwright version for byte-stable screenshots). Scripts degrade with

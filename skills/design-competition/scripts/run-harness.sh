@@ -17,11 +17,36 @@ mkdir -p "$CAND"
 cp "$SKILL_DIR/templates/NEXT_FINDINGS.json" "$RUN/NEXT_FINDINGS.json"
 echo 0 > "$RUN/budgets.json.spent"
 
+# --- RUN_MANIFEST.json (M1 provenance the agent contracts reference): written after
+# the model-id checks below prove the ids are real, before round 0 starts.
+write_manifest(){
+  jq -n --arg run "$RUN_ID" --arg mode "$MODE" --arg gen "$GENERATOR_MODEL" \
+    --arg ev "${EVALUATOR_MODEL:-human}" --arg sup "${SUPERVISOR_MODEL:-$GENERATOR_MODEL}" \
+    '{run_id:$run, mode:$mode, models:{generator:$gen, evaluator:$ev, supervisor:$sup}}' \
+    > "$RUN/RUN_MANIFEST.json"
+}
+
 # --- install the skill's subagents into the TARGET project (RUN-2) ---
 # `claude --agent <name>` discovers agents in the invocation project's .claude/agents/,
 # not in this skill's own tree — so materialize them before the first round.
 mkdir -p "$PROJECT/.claude/agents"
 cp "$SKILL_DIR/.claude/agents/"*.md "$PROJECT/.claude/agents/"
+
+# --- materialize agent model ids (the shipped files carry REPLACE_WITH_* placeholders:
+# M1 model-id locking means every run must CHOOSE its models explicitly, so the wrapper
+# fails fast rather than letting a placeholder reach the API as a model id). sed edits
+# the INSTALLED copies only — the skill's own files keep their placeholders.
+: "${GENERATOR_MODEL:?set GENERATOR_MODEL (e.g. claude-opus-5) — M1 model-id locking, recorded in RUN_MANIFEST.json}"
+if [ "$MODE" = "auto" ]; then
+  : "${EVALUATOR_MODEL:?set EVALUATOR_MODEL — invariant 8 + M1: multimodal, family MUST differ from GENERATOR_MODEL}"
+fi
+sed -i.bak "s/REPLACE_WITH_GENERATOR_MODEL_ID/$GENERATOR_MODEL/" "$PROJECT/.claude/agents/generator.md"
+sed -i.bak "s/REPLACE_WITH_SUPERVISOR_MODEL_ID/${SUPERVISOR_MODEL:-$GENERATOR_MODEL}/" "$PROJECT/.claude/agents/supervisor.md"
+if [ -n "${EVALUATOR_MODEL:-}" ]; then
+  sed -i.bak "s/REPLACE_WITH_MULTIMODAL_MODEL_ID/$EVALUATOR_MODEL/" "$PROJECT/.claude/agents/evaluator.md"
+fi
+rm -f "$PROJECT/.claude/agents/"*.bak
+write_manifest
 
 log(){ printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >> "$RUN/events.jsonl"; }
 
@@ -35,7 +60,7 @@ validate_json(){ # $1=schema $2=doc
   if command -v ajv >/dev/null 2>&1; then ajv validate --spec=draft2020 -s "$1" -d "$2" 2>>"$RUN/events.jsonl"
   else "$SKILL_DIR/scripts/validate-critique.sh" "$2" "$1" 2>>"$RUN/events.jsonl"; fi; }
 
-stop(){ echo "$1" > "$RUN/STOP_REASON"; log "STOP $1"; git -C "$PROJECT" add -A && git -C "$PROJECT" commit -q -m "harness: stop $1 ($RUN_ID)" || true; exit 0; }
+stop(){ echo "$1" > "$RUN/STOP_REASON"; log "STOP $1"; git -C "$PROJECT" add -A && git -C "$PROJECT" commit -q -m "chore(harness): stop $1 ($RUN_ID)" || log "STOP commit FAILED — round work is UNCOMMITTED"; exit 0; }
 
 for ((n=0; n<MAX_ROUNDS; n++)); do
   RD="$CAND/round-$n"; mkdir -p "$RD/build" "$RD/shots"
@@ -104,7 +129,7 @@ for ((n=0; n<MAX_ROUNDS; n++)); do
   log "round $n verdict=$VERDICT (no stop-on-PASS; C8)"
 
   # --- per-round commit (authoritative; Stop hook is only a crash backstop) ---
-  git -C "$PROJECT" add -A && git -C "$PROJECT" commit -q -m "round $n $VERDICT ($RUN_ID)" || true
+  git -C "$PROJECT" add -A && git -C "$PROJECT" commit -q -m "chore(harness): round $n $VERDICT ($RUN_ID)" || log "round $n commit FAILED — round work is UNCOMMITTED"
   # NOTE: PASS is recorded, NOT terminal. Loop continues to MAX_ROUNDS / budget / plateau (L7).
 done
 stop iter_cap

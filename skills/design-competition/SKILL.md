@@ -21,7 +21,10 @@ See the included `README.md` and `WORKFLOW.md` for detailed rules on how to run 
 2. Check the preconditions: the target project is a git repo with **at least one commit**, and the
    candidate app is being served at `http://localhost:$PORT` (default 4173) before the loop starts.
 3. Run the loop from anywhere:
-   `MODE=auto PROJECT=/path/to/project scripts/run-harness.sh` (or `MODE=human`).
+   `GENERATOR_MODEL=<model-id> MODE=auto PROJECT=/path/to/project scripts/run-harness.sh` (or `MODE=human`).
+   `GENERATOR_MODEL` is always required (M1 model-id locking — the shipped agent files carry
+   placeholders the wrapper materializes per run); Auto mode also requires `EVALUATOR_MODEL`
+   (multimodal, different model family). The chosen ids are recorded in `runs/<id>/RUN_MANIFEST.json`.
    The script itself installs this skill's subagents (`.claude/agents/{generator,evaluator,supervisor}.md`)
    into the target project's `.claude/agents/` and, in Auto mode, copies the pinned Playwright MCP
    config (`templates/mcp.json`) into each round dir — no manual agent or MCP setup.
