@@ -721,15 +721,29 @@ SCHEMA: dict[str, Any] = {
     },
 }
 
-RECEIPT_VERSION = 1
+RECEIPT_VERSION = 2
 RECEIPT_STATUSES = ("clean", "findings", "error")
 RECEIPT_BINDING_KEY_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,64}")
 RECEIPT_BINDING_VALUE_MAX = 500
 FULL_COMMIT_SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 SHA256_HEX_PATTERN = re.compile(r"[0-9a-f]{64}")
+# RFC 8785 relies on ECMAScript number formatting, which is only unambiguous
+# across languages for integers within IEEE-754 exact range.
+JCS_MAX_SAFE_INTEGER = 2**53 - 1
+JCS_STRING_ESCAPES = {
+    '"': '\\"',
+    "\\": "\\\\",
+    "\b": "\\b",
+    "\t": "\\t",
+    "\n": "\\n",
+    "\f": "\\f",
+    "\r": "\\r",
+}
 
 
 def canonical_json(value: Any) -> str:
+    """Deterministic mint-side serialization. NOT a cross-language contract:
+    consumers never re-serialize with this; they hash stored payload bytes."""
     return json.dumps(
         value,
         sort_keys=True,
@@ -737,6 +751,71 @@ def canonical_json(value: Any) -> str:
         ensure_ascii=True,
         allow_nan=False,
     )
+
+
+def jcs_escape_string(text: str) -> str:
+    parts = ['"']
+    for char in text:
+        escape = JCS_STRING_ESCAPES.get(char)
+        if escape is not None:
+            parts.append(escape)
+        elif ord(char) < 0x20:
+            parts.append(f"\\u{ord(char):04x}")
+        else:
+            parts.append(char)
+    parts.append('"')
+    return "".join(parts)
+
+
+def _jcs_serialize(value: Any) -> str:
+    if value is None:
+        return "null"
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if isinstance(value, str):
+        return jcs_escape_string(value)
+    if isinstance(value, float):
+        raise SystemExit(
+            "canonical digest input contains a float; digested structures "
+            "must be number-free or integer-only for cross-language verification"
+        )
+    if isinstance(value, int):
+        if abs(value) > JCS_MAX_SAFE_INTEGER:
+            raise SystemExit(
+                "canonical digest input integer exceeds 2**53-1 and is not "
+                "portably representable as a JSON number"
+            )
+        return str(value)
+    if isinstance(value, (list, tuple)):
+        return "[" + ",".join(_jcs_serialize(item) for item in value) + "]"
+    if isinstance(value, dict):
+        for key in value:
+            if not isinstance(key, str):
+                raise SystemExit("canonical digest input has a non-string object key")
+        items = sorted(value.items(), key=lambda item: item[0].encode("utf-16-be"))
+        return "{" + ",".join(
+            f"{jcs_escape_string(key)}:{_jcs_serialize(item)}" for key, item in items
+        ) + "}"
+    raise SystemExit(
+        f"canonical digest input has unsupported type: {type(value).__name__}"
+    )
+
+
+def canonical_bytes(value: Any) -> bytes:
+    """RFC 8785 (JCS) canonical JSON bytes for a number-safe value subset.
+
+    Supports objects, arrays, strings, null, booleans, and integers with
+    absolute value at most 2**53-1 (whose JCS serialization is unambiguous
+    in every mainstream runtime). Floats fail closed instead of hand-rolling
+    ECMAScript number formatting: every digested substructure in the receipt
+    contract is number-free or integer-only by construction. Keys sort by
+    UTF-16 code units and strings escape per RFC 8785 section 3.2.2.2, so
+    the output byte-matches JSON.stringify of a key-sorted value in
+    ECMAScript runtimes.
+    """
+    return _jcs_serialize(value).encode("utf-8")
 
 
 def contains_non_finite_number(value: Any) -> bool:
@@ -749,23 +828,35 @@ def contains_non_finite_number(value: Any) -> bool:
     return False
 
 
-def sha256_hex(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+def sha256_hex(data: str | bytes) -> str:
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    return hashlib.sha256(data).hexdigest()
 
 
-def receipt_artifact_digest(receipt: dict[str, Any]) -> str:
-    """Deterministic digest over the receipt with its own digest field blanked.
+def verify_receipt_document(envelope: dict[str, Any]) -> dict[str, Any]:
+    """Verify a parsed receipt envelope and return its authenticated payload.
 
-    Consumers verify a receipt by recomputing sha256 over the canonical JSON
-    (sorted keys, compact separators, ASCII) of the parsed document with
-    "artifact_digest" set to the empty string.
+    The artifact digest is byte-pinned: sha256 over the UTF-8 bytes of the
+    stored "payload" string exactly as any JSON parser returns it. Consumers
+    never re-serialize anything, so language-specific JSON formatting cannot
+    change the digest.
     """
-    unsigned = {**receipt, "artifact_digest": ""}
-    return sha256_hex(canonical_json(unsigned))
+    payload_text = envelope.get("payload")
+    if not isinstance(payload_text, str):
+        raise SystemExit("receipt envelope has no payload string")
+    if sha256_hex(payload_text) != envelope.get("artifact_digest"):
+        raise SystemExit("receipt artifact digest does not match its payload bytes")
+    payload = json.loads(payload_text)
+    if not isinstance(payload, dict):
+        raise SystemExit("receipt payload is not an object")
+    if payload.get("receipt_version") != envelope.get("receipt_version"):
+        raise SystemExit("receipt payload/envelope version mismatch")
+    return payload
 
 
 def source_snapshot_digest(snapshot: object) -> str:
-    return sha256_hex(canonical_json(snapshot))
+    return sha256_hex(canonical_bytes(snapshot))
 
 
 def parse_binding_pairs(values: list[str] | None) -> dict[str, str]:
@@ -860,7 +951,7 @@ class ReviewReceipt:
             )
             self.write_error("invalid_output", message)
             raise SystemExit(message)
-        receipt: dict[str, Any] = {
+        content: dict[str, Any] = {
             "receipt_version": RECEIPT_VERSION,
             "status": status,
             "reviewers": self.reviewer_entries(),
@@ -869,13 +960,21 @@ class ReviewReceipt:
             "report": report,
             "error": error,
         }
-        receipt["artifact_digest"] = receipt_artifact_digest(receipt)
-        atomic_write_text(self.path, canonical_json(receipt) + "\n")
+        payload_text = canonical_json(content)
+        digest = sha256_hex(payload_text)
+        envelope = canonical_json(
+            {
+                "artifact_digest": digest,
+                "payload": payload_text,
+                "receipt_version": RECEIPT_VERSION,
+            }
+        )
+        atomic_write_text(self.path, envelope + "\n")
         self.written = True
         # Echo the digest on the helper's own stdout as a second channel:
         # the invoking process reads it directly, so a later rewrite of the
         # receipt file cannot retroactively match what was announced here.
-        print(f"receipt_artifact_digest: {receipt['artifact_digest']}")
+        print(f"receipt_artifact_digest: {digest}")
 
     def write_error(self, kind: str, message: str) -> None:
         self.write("error", error={"kind": kind, "message": bounded_field(message, 4000)})
@@ -914,9 +1013,9 @@ def review_target_binding(
     else:
         reviewed_commit = head
     paths = sorted(changed_paths)
-    # Canonical-JSON encoding is injective even for paths containing
+    # JCS array-of-strings encoding is injective even for paths containing
     # newlines; a plain newline join is not.
-    changed_paths_digest = sha256_hex(canonical_json(paths))
+    changed_paths_digest = sha256_hex(canonical_bytes(paths))
     binding: dict[str, Any] = {
         "mode": target,
         "reviewed_commit": reviewed_commit,
@@ -928,7 +1027,7 @@ def review_target_binding(
         "changed_paths_digest": changed_paths_digest,
     }
     binding["scope_digest"] = sha256_hex(
-        canonical_json(
+        canonical_bytes(
             {
                 "mode": binding["mode"],
                 "reviewed_commit": binding["reviewed_commit"],

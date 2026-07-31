@@ -2,7 +2,9 @@
 """Deterministic tests for the versioned, digest-bound review receipt contract.
 
 No real review engines run here: every test drives the CLI with the bundled
-fake engine scripts, so results are reproducible and offline.
+fake engine scripts, so results are reproducible and offline. The Node.js
+interoperability tests use only the Node standard library and skip cleanly
+when no node binary is available.
 """
 from __future__ import annotations
 
@@ -10,6 +12,7 @@ import hashlib
 import json
 import os
 import runpy
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -19,7 +22,8 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "autoreview"
 
-RECEIPT_KEYS = {
+ENVELOPE_KEYS = {"artifact_digest", "payload", "receipt_version"}
+PAYLOAD_KEYS = {
     "receipt_version",
     "status",
     "reviewers",
@@ -27,7 +31,6 @@ RECEIPT_KEYS = {
     "binding",
     "report",
     "error",
-    "artifact_digest",
 }
 TARGET_KEYS = {
     "mode",
@@ -40,6 +43,19 @@ TARGET_KEYS = {
     "changed_paths_digest",
     "scope_digest",
 }
+
+# A recursive JCS-subset canonicalizer in ECMAScript: JSON.stringify already
+# implements RFC 8785 string escaping and safe-integer formatting, and
+# Array.prototype.sort() compares UTF-16 code units as JCS requires.
+NODE_JCS_FUNCTION = """
+function jcs(v) {
+  if (v === null || typeof v !== "object") return JSON.stringify(v);
+  if (Array.isArray(v)) return "[" + v.map(jcs).join(",") + "]";
+  return "{" + Object.keys(v).sort().map(
+    (k) => JSON.stringify(k) + ":" + jcs(v[k])
+  ).join(",") + "}";
+}
+"""
 
 
 def load_helper() -> dict[str, object]:
@@ -214,26 +230,33 @@ class ReceiptContractTests(unittest.TestCase):
             check=False,
         )
 
-    def load_receipt(self, workspace: dict[str, object]) -> dict[str, object]:
+    def load_receipt(self, workspace: dict[str, object]) -> tuple[dict[str, object], dict[str, object]]:
+        """Return (envelope, verified payload) for the workspace receipt."""
         receipt_path = workspace["receipt"]
         self.assertTrue(receipt_path.is_file(), "receipt file must exist")
-        document = json.loads(receipt_path.read_text(encoding="utf-8"))
-        self.assertEqual(set(document), RECEIPT_KEYS)
-        self.assertEqual(document["receipt_version"], 1)
-        self.assertIn(document["status"], ("clean", "findings", "error"))
-        self.assertIsInstance(document["reviewers"], list)
-        self.assertIsInstance(document["binding"], dict)
-        self.assertRegex(document["artifact_digest"], r"^[0-9a-f]{64}$")
-        recomputed = self.helper["receipt_artifact_digest"](document)
-        self.assertEqual(recomputed, document["artifact_digest"])
-        if document["status"] == "error":
-            self.assertIsNone(document["report"])
-            self.assertIsInstance(document["error"], dict)
-            self.assertEqual(set(document["error"]), {"kind", "message"})
+        envelope = json.loads(receipt_path.read_text(encoding="utf-8"))
+        self.assertEqual(set(envelope), ENVELOPE_KEYS)
+        self.assertEqual(envelope["receipt_version"], 2)
+        self.assertRegex(envelope["artifact_digest"], r"^[0-9a-f]{64}$")
+        # Documented byte-pinned verification: hash the stored payload string.
+        self.assertEqual(
+            hashlib.sha256(envelope["payload"].encode("utf-8")).hexdigest(),
+            envelope["artifact_digest"],
+        )
+        payload = self.helper["verify_receipt_document"](envelope)
+        self.assertEqual(set(payload), PAYLOAD_KEYS)
+        self.assertEqual(payload["receipt_version"], 2)
+        self.assertIn(payload["status"], ("clean", "findings", "error"))
+        self.assertIsInstance(payload["reviewers"], list)
+        self.assertIsInstance(payload["binding"], dict)
+        if payload["status"] == "error":
+            self.assertIsNone(payload["report"])
+            self.assertIsInstance(payload["error"], dict)
+            self.assertEqual(set(payload["error"]), {"kind", "message"})
         else:
-            self.assertIsNone(document["error"])
-            self.assertIsInstance(document["report"], dict)
-        return document
+            self.assertIsNone(payload["error"])
+            self.assertIsInstance(payload["report"], dict)
+        return envelope, payload
 
     @unittest.skipIf(os.name == "nt", "the fake executables are POSIX-only")
     def test_clean_receipt_schema_and_digest_stability(self) -> None:
@@ -242,11 +265,11 @@ class ReceiptContractTests(unittest.TestCase):
             first = self.run_cli(workspace, "--bind", "issue=PAR-1", "--bind", "task_generation=gen-1")
             self.assertEqual(first.returncode, 0, first.stderr)
             first_bytes = workspace["receipt"].read_bytes()
-            document = self.load_receipt(workspace)
-            self.assertEqual(document["status"], "clean")
-            self.assertEqual(document["binding"], {"issue": "PAR-1", "task_generation": "gen-1"})
-            self.assertEqual(set(document["target"]), TARGET_KEYS)
-            target = document["target"]
+            _, payload = self.load_receipt(workspace)
+            self.assertEqual(payload["status"], "clean")
+            self.assertEqual(payload["binding"], {"issue": "PAR-1", "task_generation": "gen-1"})
+            self.assertEqual(set(payload["target"]), TARGET_KEYS)
+            target = payload["target"]
             self.assertEqual(target["mode"], "local")
             self.assertEqual(target["reviewed_commit"], git(workspace["repo"], "rev-parse", "HEAD").strip())
             self.assertEqual(target["changed_paths"], ["a.txt"])
@@ -255,7 +278,7 @@ class ReceiptContractTests(unittest.TestCase):
             self.assertRegex(target["tree_digest"], r"^[0-9a-f]{64}$")
             self.assertRegex(target["bundle_digest"], r"^[0-9a-f]{64}$")
             self.assertRegex(target["scope_digest"], r"^[0-9a-f]{64}$")
-            reviewer = document["reviewers"][0]
+            reviewer = payload["reviewers"][0]
             self.assertEqual(reviewer["engine"], "codex")
             self.assertEqual(reviewer["model"], "gpt-5.6-sol")
             self.assertEqual(reviewer["model_used"], "gpt-5.6-sol")
@@ -271,15 +294,15 @@ class ReceiptContractTests(unittest.TestCase):
             workspace = self.make_workspace(Path(tempdir))
             first = self.run_cli(workspace, "--bind", "task_generation=gen-1")
             self.assertEqual(first.returncode, 0, first.stderr)
-            generation_one = self.load_receipt(workspace)
+            envelope_one, payload_one = self.load_receipt(workspace)
             workspace["receipt"].unlink()
             second = self.run_cli(workspace, "--bind", "task_generation=gen-2")
             self.assertEqual(second.returncode, 0, second.stderr)
-            generation_two = self.load_receipt(workspace)
-            self.assertEqual(generation_one["target"], generation_two["target"])
+            envelope_two, payload_two = self.load_receipt(workspace)
+            self.assertEqual(payload_one["target"], payload_two["target"])
             self.assertNotEqual(
-                generation_one["artifact_digest"],
-                generation_two["artifact_digest"],
+                envelope_one["artifact_digest"],
+                envelope_two["artifact_digest"],
                 "a receipt minted for one task generation must not digest-match another",
             )
 
@@ -289,9 +312,9 @@ class ReceiptContractTests(unittest.TestCase):
             workspace = self.make_workspace(Path(tempdir), findings_codex_script())
             result = self.run_cli(workspace)
             self.assertEqual(result.returncode, 1, result.stderr)
-            document = self.load_receipt(workspace)
-            self.assertEqual(document["status"], "findings")
-            self.assertEqual(len(document["report"]["findings"]), 1)
+            _, payload = self.load_receipt(workspace)
+            self.assertEqual(payload["status"], "findings")
+            self.assertEqual(len(payload["report"]["findings"]), 1)
 
     @unittest.skipIf(os.name == "nt", "the fake executables are POSIX-only")
     def test_engine_failure_writes_error_receipt(self) -> None:
@@ -299,9 +322,9 @@ class ReceiptContractTests(unittest.TestCase):
             workspace = self.make_workspace(Path(tempdir), failing_codex_script())
             result = self.run_cli(workspace)
             self.assertNotEqual(result.returncode, 0)
-            document = self.load_receipt(workspace)
-            self.assertEqual(document["status"], "error")
-            self.assertEqual(document["error"]["kind"], "engine_failure")
+            _, payload = self.load_receipt(workspace)
+            self.assertEqual(payload["status"], "error")
+            self.assertEqual(payload["error"]["kind"], "engine_failure")
             self.assertNotIn("clean", result.stdout)
 
     @unittest.skipIf(os.name == "nt", "the fake executables are POSIX-only")
@@ -310,9 +333,9 @@ class ReceiptContractTests(unittest.TestCase):
             workspace = self.make_workspace(Path(tempdir), garbage_codex_script())
             result = self.run_cli(workspace)
             self.assertNotEqual(result.returncode, 0)
-            document = self.load_receipt(workspace)
-            self.assertEqual(document["status"], "error")
-            self.assertEqual(document["error"]["kind"], "invalid_output")
+            _, payload = self.load_receipt(workspace)
+            self.assertEqual(payload["status"], "error")
+            self.assertEqual(payload["error"]["kind"], "invalid_output")
 
     @unittest.skipIf(os.name == "nt", "the fake executables are POSIX-only")
     def test_source_mutation_after_freeze_writes_error_receipt(self) -> None:
@@ -321,9 +344,9 @@ class ReceiptContractTests(unittest.TestCase):
             workspace["env"]["AUTOREVIEW_FAKE_MUTATE"] = str(workspace["repo"] / "a.txt")
             result = self.run_cli(workspace)
             self.assertEqual(result.returncode, 1, result.stdout)
-            document = self.load_receipt(workspace)
-            self.assertEqual(document["status"], "error")
-            self.assertEqual(document["error"]["kind"], "source_mutation")
+            _, payload = self.load_receipt(workspace)
+            self.assertEqual(payload["status"], "error")
+            self.assertEqual(payload["error"]["kind"], "source_mutation")
 
     @unittest.skipIf(os.name == "nt", "the fake executables are POSIX-only")
     def test_expect_commit_match_passes_and_mismatch_fails_closed(self) -> None:
@@ -332,15 +355,15 @@ class ReceiptContractTests(unittest.TestCase):
             head = git(workspace["repo"], "rev-parse", "HEAD").strip()
             match = self.run_cli(workspace, "--expect-commit", head)
             self.assertEqual(match.returncode, 0, match.stderr)
-            self.assertEqual(self.load_receipt(workspace)["status"], "clean")
+            self.assertEqual(self.load_receipt(workspace)[1]["status"], "clean")
 
             workspace["receipt"].unlink()
             workspace["record"].unlink()
             mismatch = self.run_cli(workspace, "--expect-commit", "0" * 40)
             self.assertNotEqual(mismatch.returncode, 0)
-            document = self.load_receipt(workspace)
-            self.assertEqual(document["status"], "error")
-            self.assertEqual(document["error"]["kind"], "target_mismatch")
+            _, payload = self.load_receipt(workspace)
+            self.assertEqual(payload["status"], "error")
+            self.assertEqual(payload["error"]["kind"], "target_mismatch")
             self.assertFalse(
                 workspace["record"].exists(),
                 "the review engine must not run after a target mismatch",
@@ -358,9 +381,9 @@ class ReceiptContractTests(unittest.TestCase):
             workspace["record"].unlink()
             mismatch = self.run_cli(workspace, "--expect-changed-paths-digest", "0" * 64)
             self.assertNotEqual(mismatch.returncode, 0)
-            document = self.load_receipt(workspace)
-            self.assertEqual(document["status"], "error")
-            self.assertEqual(document["error"]["kind"], "scope_mismatch")
+            _, payload = self.load_receipt(workspace)
+            self.assertEqual(payload["status"], "error")
+            self.assertEqual(payload["error"]["kind"], "scope_mismatch")
             self.assertFalse(
                 workspace["record"].exists(),
                 "the review engine must not run after a scope mismatch",
@@ -372,45 +395,9 @@ class ReceiptContractTests(unittest.TestCase):
             workspace = self.make_workspace(Path(tempdir))
             result = self.run_cli(workspace, "--parallel-tests", "false")
             self.assertEqual(result.returncode, 1, result.stderr)
-            document = self.load_receipt(workspace)
-            self.assertEqual(document["status"], "error")
-            self.assertEqual(document["error"]["kind"], "parallel_tests_failed")
-
-    @unittest.skipIf(os.name == "nt", "the fake executables are POSIX-only")
-    def test_bind_requires_receipt_output(self) -> None:
-        with tempfile.TemporaryDirectory() as tempdir:
-            workspace = self.make_workspace(Path(tempdir))
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    str(SCRIPT),
-                    "--mode",
-                    "local",
-                    "--engine",
-                    "codex",
-                    "--codex-bin",
-                    str(workspace["codex_bin"]),
-                    "--bind",
-                    "issue=PAR-1",
-                ],
-                cwd=workspace["repo"],
-                env=workspace["env"],
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("--bind requires --receipt-output", result.stderr)
-
-    @unittest.skipIf(os.name == "nt", "the fake executables are POSIX-only")
-    def test_receipt_output_inside_repo_is_rejected(self) -> None:
-        with tempfile.TemporaryDirectory() as tempdir:
-            workspace = self.make_workspace(Path(tempdir))
-            workspace["receipt"] = workspace["repo"] / "receipt.json"
-            result = self.run_cli(workspace)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("--receipt-output must point outside the reviewed repository", result.stderr)
-            self.assertFalse(workspace["receipt"].exists())
+            _, payload = self.load_receipt(workspace)
+            self.assertEqual(payload["status"], "error")
+            self.assertEqual(payload["error"]["kind"], "parallel_tests_failed")
 
     @unittest.skipIf(os.name == "nt", "the fake executables are POSIX-only")
     def test_stdout_echoes_the_artifact_digest_as_a_second_channel(self) -> None:
@@ -418,9 +405,9 @@ class ReceiptContractTests(unittest.TestCase):
             workspace = self.make_workspace(Path(tempdir))
             result = self.run_cli(workspace)
             self.assertEqual(result.returncode, 0, result.stderr)
-            document = self.load_receipt(workspace)
+            envelope, _ = self.load_receipt(workspace)
             self.assertIn(
-                f"receipt_artifact_digest: {document['artifact_digest']}",
+                f"receipt_artifact_digest: {envelope['artifact_digest']}",
                 result.stdout,
                 "the invoker must be able to pin the digest from the helper's stdout",
             )
@@ -431,9 +418,9 @@ class ReceiptContractTests(unittest.TestCase):
             workspace = self.make_workspace(Path(tempdir), nan_codex_script())
             result = self.run_cli(workspace)
             self.assertNotEqual(result.returncode, 0)
-            document = self.load_receipt(workspace)
-            self.assertEqual(document["status"], "error")
-            self.assertEqual(document["error"]["kind"], "invalid_output")
+            _, payload = self.load_receipt(workspace)
+            self.assertEqual(payload["status"], "error")
+            self.assertEqual(payload["error"]["kind"], "invalid_output")
 
     def test_receipt_write_guard_refuses_non_finite_numbers(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -442,9 +429,10 @@ class ReceiptContractTests(unittest.TestCase):
             bad_report = {"findings": [], "overall_confidence": float("nan")}
             with self.assertRaisesRegex(SystemExit, "non-finite"):
                 receipt.write("clean", report=bad_report)
-            document = json.loads(receipt_path.read_text(encoding="utf-8"))
-            self.assertEqual(document["status"], "error")
-            self.assertEqual(document["error"]["kind"], "invalid_output")
+            envelope = json.loads(receipt_path.read_text(encoding="utf-8"))
+            payload = self.helper["verify_receipt_document"](envelope)
+            self.assertEqual(payload["status"], "error")
+            self.assertEqual(payload["error"]["kind"], "invalid_output")
             self.assertTrue(self.helper["contains_non_finite_number"](bad_report))
             self.assertFalse(self.helper["contains_non_finite_number"]({"a": [1.0, 2]}))
 
@@ -540,14 +528,50 @@ class ReceiptContractTests(unittest.TestCase):
                 [reviewed_sha],
                 "the bundle must be built from the frozen sha, not the movable ref name",
             )
-            document = self.load_receipt(workspace)
-            self.assertEqual(document["status"], "clean")
+            _, payload = self.load_receipt(workspace)
+            self.assertEqual(payload["status"], "clean")
             self.assertEqual(
-                document["target"]["reviewed_commit"],
+                payload["target"]["reviewed_commit"],
                 reviewed_sha,
                 "the receipt must attest the commit that was actually reviewed, "
                 "not where the ref moved afterwards",
             )
+
+    @unittest.skipIf(os.name == "nt", "the fake executables are POSIX-only")
+    def test_bind_requires_receipt_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            workspace = self.make_workspace(Path(tempdir))
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--mode",
+                    "local",
+                    "--engine",
+                    "codex",
+                    "--codex-bin",
+                    str(workspace["codex_bin"]),
+                    "--bind",
+                    "issue=PAR-1",
+                ],
+                cwd=workspace["repo"],
+                env=workspace["env"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("--bind requires --receipt-output", result.stderr)
+
+    @unittest.skipIf(os.name == "nt", "the fake executables are POSIX-only")
+    def test_receipt_output_inside_repo_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            workspace = self.make_workspace(Path(tempdir))
+            workspace["receipt"] = workspace["repo"] / "receipt.json"
+            result = self.run_cli(workspace)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("--receipt-output must point outside the reviewed repository", result.stderr)
+            self.assertFalse(workspace["receipt"].exists())
 
     def test_binding_pair_validation(self) -> None:
         parse = self.helper["parse_binding_pairs"]
@@ -572,23 +596,177 @@ class ReceiptContractTests(unittest.TestCase):
             )
 
     def test_receipt_digest_recompute_matches_documented_procedure(self) -> None:
-        receipt = {
-            "receipt_version": 1,
-            "status": "clean",
-            "reviewers": [],
-            "target": None,
-            "binding": {},
-            "report": {"findings": []},
-            "error": None,
+        payload_text = '{"answer":42,"receipt_version":2}'
+        envelope = {
+            "artifact_digest": hashlib.sha256(payload_text.encode("utf-8")).hexdigest(),
+            "payload": payload_text,
+            "receipt_version": 2,
         }
-        digest = self.helper["receipt_artifact_digest"](receipt)
-        unsigned = {**receipt, "artifact_digest": ""}
-        expected = hashlib.sha256(
-            json.dumps(unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
-        ).hexdigest()
-        self.assertEqual(digest, expected)
-        signed = {**receipt, "artifact_digest": digest}
-        self.assertEqual(self.helper["receipt_artifact_digest"](signed), digest)
+        payload = self.helper["verify_receipt_document"](envelope)
+        self.assertEqual(payload, {"answer": 42, "receipt_version": 2})
+
+    def test_verify_receipt_document_rejects_tampering(self) -> None:
+        verify = self.helper["verify_receipt_document"]
+        payload_text = '{"receipt_version":2,"status":"error"}'
+        digest = hashlib.sha256(payload_text.encode("utf-8")).hexdigest()
+        with self.assertRaisesRegex(SystemExit, "does not match"):
+            verify(
+                {
+                    "artifact_digest": digest,
+                    "payload": '{"receipt_version":2,"status":"clean"}',
+                    "receipt_version": 2,
+                }
+            )
+        with self.assertRaisesRegex(SystemExit, "version mismatch"):
+            verify(
+                {
+                    "artifact_digest": digest,
+                    "payload": payload_text,
+                    "receipt_version": 1,
+                }
+            )
+        with self.assertRaisesRegex(SystemExit, "no payload string"):
+            verify({"artifact_digest": digest, "receipt_version": 2})
+
+    def test_jcs_canonical_bytes_vectors(self) -> None:
+        canonical = self.helper["canonical_bytes"]
+        self.assertEqual(canonical(None), b"null")
+        self.assertEqual(canonical(True), b"true")
+        self.assertEqual(canonical(False), b"false")
+        self.assertEqual(canonical(0), b"0")
+        self.assertEqual(canonical(-42), b"-42")
+        self.assertEqual(canonical(2**53 - 1), b"9007199254740991")
+        self.assertEqual(canonical([]), b"[]")
+        self.assertEqual(canonical({}), b"{}")
+        # Explicit byte expectations (RFC 8785 section 3.2.2.2): non-ASCII
+        # stays raw UTF-8; quotes, backslashes, and controls escape.
+        self.assertEqual(
+            canonical("h\u00e9\n\t\"\\\x07\U0001f600"),
+            b'"h\xc3\xa9\\n\\t\\"\\\\\\u0007\xf0\x9f\x98\x80"',
+        )
+        self.assertEqual(
+            canonical({"b": "x", "a": [1, None, True], "nested": {"z": "", "y": "v"}}),
+            b'{"a":[1,null,true],"b":"x","nested":{"y":"v","z":""}}',
+        )
+
+    def test_jcs_utf16_key_ordering(self) -> None:
+        # U+1F600 encodes as UTF-16 surrogates starting 0xD83D, which sorts
+        # BEFORE U+FFFD under RFC 8785 UTF-16 code-unit ordering, although
+        # its code point is larger.
+        canonical = self.helper["canonical_bytes"]
+        value = {"�": "replacement", "\U0001f600": "astral"}
+        expected = (
+            b'{"' + "\U0001f600".encode("utf-8") + b'":"astral","'
+            + "�".encode("utf-8") + b'":"replacement"}'
+        )
+        self.assertEqual(canonical(value), expected)
+
+    def test_jcs_rejects_floats_and_unsafe_integers(self) -> None:
+        canonical = self.helper["canonical_bytes"]
+        for bad in (1.0, 0.5, -0.0, 1e16, 1e21, float("nan"), float("inf")):
+            with self.subTest(bad=bad), self.assertRaisesRegex(SystemExit, "float"):
+                canonical({"value": bad})
+        for bad_int in (2**53, -(2**53), 2**63):
+            with self.subTest(bad_int=bad_int), self.assertRaisesRegex(SystemExit, "2\\*\\*53-1"):
+                canonical({"value": bad_int})
+        with self.assertRaisesRegex(SystemExit, "non-string object key"):
+            canonical({1: "x"})
+
+    @unittest.skipUnless(shutil.which("node"), "node runtime unavailable")
+    def test_node_jcs_interop_vectors(self) -> None:
+        vector = {
+            "b": "x",
+            "a": [1, 2, 9007199254740991, None, True, False],
+            "nested": {
+                "z": None,
+                "y": "v",
+                "\U0001f600": "astral",
+                "�": "replacement",
+            },
+            "unicode": "héllo\n\t\"\\  \U0001f600",
+            "empty_object": {},
+            "empty_array": [],
+        }
+        python_digest = hashlib.sha256(self.helper["canonical_bytes"](vector)).hexdigest()
+        script = (
+            NODE_JCS_FUNCTION
+            + """
+const crypto = require("crypto");
+let raw = "";
+process.stdin.on("data", (chunk) => { raw += chunk; });
+process.stdin.on("end", () => {
+  const value = JSON.parse(raw);
+  const digest = crypto.createHash("sha256")
+    .update(Buffer.from(jcs(value), "utf8")).digest("hex");
+  process.stdout.write(digest);
+});
+"""
+        )
+        result = subprocess.run(
+            ["node", "-e", script],
+            input=json.dumps(vector),
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        self.assertEqual(
+            result.stdout.strip(),
+            python_digest,
+            "Node JSON.stringify-based JCS must byte-match the Python canonicalizer",
+        )
+
+    @unittest.skipIf(os.name == "nt", "the fake executables are POSIX-only")
+    @unittest.skipUnless(shutil.which("node"), "node runtime unavailable")
+    def test_node_independently_verifies_a_real_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            workspace = self.make_workspace(Path(tempdir))
+            result = self.run_cli(workspace, "--bind", "issue=PAR-1")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            envelope, _ = self.load_receipt(workspace)
+            script = (
+                NODE_JCS_FUNCTION
+                + """
+const fs = require("fs");
+const crypto = require("crypto");
+const sha256 = (text) =>
+  crypto.createHash("sha256").update(Buffer.from(text, "utf8")).digest("hex");
+const envelope = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+if (sha256(envelope.payload) !== envelope.artifact_digest) {
+  throw new Error("artifact digest mismatch");
+}
+const payload = JSON.parse(envelope.payload);
+if (payload.receipt_version !== envelope.receipt_version) {
+  throw new Error("version mismatch");
+}
+const target = payload.target;
+if (sha256(jcs(target.changed_paths)) !== target.changed_paths_digest) {
+  throw new Error("changed-paths digest mismatch");
+}
+const scope = {
+  mode: target.mode,
+  reviewed_commit: target.reviewed_commit,
+  base_commit: target.base_commit,
+  tree_digest: target.tree_digest,
+  bundle_digest: target.bundle_digest,
+  changed_paths_digest: target.changed_paths_digest,
+};
+if (sha256(jcs(scope)) !== target.scope_digest) {
+  throw new Error("scope digest mismatch");
+}
+process.stdout.write("node-verified " + envelope.artifact_digest);
+"""
+            )
+            verification = subprocess.run(
+                ["node", "-e", script, str(workspace["receipt"])],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(verification.returncode, 0, verification.stderr)
+            self.assertEqual(
+                verification.stdout.strip(),
+                f"node-verified {envelope['artifact_digest']}",
+            )
 
 
 if __name__ == "__main__":
