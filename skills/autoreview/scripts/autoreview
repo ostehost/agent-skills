@@ -739,6 +739,21 @@ JCS_STRING_ESCAPES = {
     "\f": "\\f",
     "\r": "\\r",
 }
+RECEIPT_DIGEST_MARKER = "receipt_artifact_digest:"
+
+
+def neutralize_receipt_marker_lines(text: str) -> str:
+    """Space-prefix report lines that would collide with the stdout marker.
+
+    Reviewer-controlled report text shares stdout with the genuine
+    `receipt_artifact_digest:` pin. The genuine marker is always the final
+    stdout emission, and consumers must extract the LAST matching line; this
+    guard additionally keeps forged marker lines out of column 0 entirely.
+    """
+    return "\n".join(
+        (" " + line) if line.startswith(RECEIPT_DIGEST_MARKER) else line
+        for line in text.split("\n")
+    )
 
 
 def canonical_json(value: Any) -> str:
@@ -993,7 +1008,9 @@ class ReviewReceipt:
         # Echo the digest on the helper's own stdout as a second channel:
         # the invoking process reads it directly, so a later rewrite of the
         # receipt file cannot retroactively match what was announced here.
-        print(f"receipt_artifact_digest: {digest}")
+        # This is the final stdout emission on every path; consumers must
+        # extract the LAST line matching the marker.
+        print(f"{RECEIPT_DIGEST_MARKER} {digest}")
 
     def write_error(self, kind: str, message: str) -> None:
         self.write("error", error={"kind": kind, "message": bounded_field(message, 4000)})
@@ -8326,10 +8343,10 @@ def print_report(report: dict[str, Any], *, label: str = "autoreview") -> None:
             f"{display_escape(finding['title'], 140)}"
         )
         print(f"{display_escape(loc['file_path'], 500)}:{loc['line']}")
-        print(display_escape(finding["body"], 2000, multiline=True))
+        print(neutralize_receipt_marker_lines(display_escape(finding["body"], 2000, multiline=True)))
         print()
     print(f"overall: {report['overall_correctness']} ({report['overall_confidence']})")
-    print(display_escape(report["overall_explanation"], 3000, multiline=True))
+    print(neutralize_receipt_marker_lines(display_escape(report["overall_explanation"], 3000, multiline=True)))
 
 
 def start_parallel_tests(
@@ -9257,6 +9274,11 @@ def main() -> int:
         raise SystemExit(
             "--allow-partial-panel is incompatible with --receipt-output; "
             "a receipt must attest every configured reviewer"
+        )
+    if args.receipt_output and args.expect_findings:
+        raise SystemExit(
+            "--expect-findings is incompatible with --receipt-output; "
+            "a receipt attests the review outcome, not harness acceptance expectations"
         )
     if args.dry_run:
         return 0
