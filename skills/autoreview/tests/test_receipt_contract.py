@@ -230,7 +230,7 @@ class ReceiptContractTests(unittest.TestCase):
             self.assertEqual(target["mode"], "local")
             self.assertEqual(target["reviewed_commit"], git(workspace["repo"], "rev-parse", "HEAD").strip())
             self.assertEqual(target["changed_paths"], ["a.txt"])
-            expected_paths_digest = hashlib.sha256(b"a.txt\n").hexdigest()
+            expected_paths_digest = hashlib.sha256(b'["a.txt"]').hexdigest()
             self.assertEqual(target["changed_paths_digest"], expected_paths_digest)
             self.assertRegex(target["tree_digest"], r"^[0-9a-f]{64}$")
             self.assertRegex(target["bundle_digest"], r"^[0-9a-f]{64}$")
@@ -330,7 +330,7 @@ class ReceiptContractTests(unittest.TestCase):
     def test_expect_changed_paths_digest_mismatch_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             workspace = self.make_workspace(Path(tempdir))
-            expected = hashlib.sha256(b"a.txt\n").hexdigest()
+            expected = hashlib.sha256(b'["a.txt"]').hexdigest()
             match = self.run_cli(workspace, "--expect-changed-paths-digest", expected)
             self.assertEqual(match.returncode, 0, match.stderr)
 
@@ -391,6 +391,107 @@ class ReceiptContractTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("--receipt-output must point outside the reviewed repository", result.stderr)
             self.assertFalse(workspace["receipt"].exists())
+
+    @unittest.skipIf(os.name == "nt", "the fake executables are POSIX-only")
+    def test_allow_partial_panel_is_rejected_with_receipt_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            workspace = self.make_workspace(Path(tempdir))
+            result = self.run_cli(workspace, "--reviewers", "codex,claude", "--allow-partial-panel")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("--allow-partial-panel is incompatible with --receipt-output", result.stderr)
+            self.assertFalse(
+                workspace["record"].exists(),
+                "no reviewer may run when the receipt contract is unsatisfiable",
+            )
+            self.assertFalse(workspace["receipt"].exists())
+
+    def test_changed_paths_digest_is_injective_for_newline_paths(self) -> None:
+        snapshot = ("0" * 40, "", ())
+        binding_one = self.helper["review_target_binding"](
+            "local", snapshot, None, None, None, "bundle", {"a", "b"}
+        )
+        binding_two = self.helper["review_target_binding"](
+            "local", snapshot, None, None, None, "bundle", {"a\nb"}
+        )
+        self.assertNotEqual(
+            binding_one["changed_paths_digest"],
+            binding_two["changed_paths_digest"],
+            "paths [a, b] and [a\\nb] must not share a digest",
+        )
+        self.assertNotEqual(binding_one["scope_digest"], binding_two["scope_digest"])
+
+    @unittest.skipIf(os.name == "nt", "the fake executables are POSIX-only")
+    def test_movable_ref_is_frozen_before_bundle_construction(self) -> None:
+        import contextlib
+        import io
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            workspace = self.make_workspace(root)
+            repo = workspace["repo"]
+            git(repo, "add", "a.txt")
+            git(repo, "commit", "-qm", "second")
+            reviewed_sha = git(repo, "rev-parse", "HEAD").strip()
+            (repo / "a.txt").write_text("third\n", encoding="utf-8")
+            git(repo, "add", "a.txt")
+            git(repo, "commit", "-qm", "third")
+            moved_sha = git(repo, "rev-parse", "HEAD").strip()
+            git(repo, "branch", "movable", reviewed_sha)
+
+            original_bundle = self.helper["commit_bundle"]
+            recorded_refs: list[str] = []
+
+            def moving_commit_bundle(repo_path: Path, commit_ref: str):
+                recorded_refs.append(commit_ref)
+                git(repo, "update-ref", "refs/heads/movable", moved_sha)
+                return original_bundle(repo_path, commit_ref)
+
+            argv = [
+                "autoreview",
+                "--mode",
+                "commit",
+                "--commit",
+                "movable",
+                "--engine",
+                "codex",
+                "--codex-bin",
+                str(workspace["codex_bin"]),
+                "--receipt-output",
+                str(workspace["receipt"]),
+            ]
+            cwd = os.getcwd()
+            os.chdir(repo)
+            try:
+                with mock.patch.dict(
+                    self.helper["main"].__globals__,
+                    {"commit_bundle": moving_commit_bundle},
+                ), mock.patch.object(sys, "argv", argv), mock.patch.dict(
+                    os.environ,
+                    {
+                        "AUTOREVIEW_FAKE_RECORD": str(workspace["record"]),
+                        "HOME": str(root),
+                        "USERPROFILE": str(root),
+                    },
+                ), contextlib.redirect_stdout(io.StringIO()):
+                    exit_code = self.helper["main"]()
+            finally:
+                os.chdir(cwd)
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(
+                recorded_refs,
+                [reviewed_sha],
+                "the bundle must be built from the frozen sha, not the movable ref name",
+            )
+            document = self.load_receipt(workspace)
+            self.assertEqual(document["status"], "clean")
+            self.assertEqual(
+                document["target"]["reviewed_commit"],
+                reviewed_sha,
+                "the receipt must attest the commit that was actually reviewed, "
+                "not where the ref moved afterwards",
+            )
 
     def test_binding_pair_validation(self) -> None:
         parse = self.helper["parse_binding_pairs"]

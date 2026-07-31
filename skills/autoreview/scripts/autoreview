@@ -853,43 +853,42 @@ class ReviewReceipt:
         self.write("error", error={"kind": kind, "message": bounded_field(message, 4000)})
 
 
+def resolve_commit_sha(repo: Path, ref: str, label: str) -> str:
+    """Freeze a possibly movable ref to an immutable commit sha.
+
+    Receipt-bound runs must resolve every ref before any bundle or path
+    query so a concurrently moving ref cannot make the receipt attest a
+    different commit than the one actually reviewed.
+    """
+    validate_git_ref(repo, ref, label)
+    return git(
+        repo,
+        "rev-parse",
+        "--verify",
+        "--end-of-options",
+        f"{ref}^{{commit}}",
+    ).strip()
+
+
 def review_target_binding(
-    repo: Path,
     target: str,
-    target_ref: str | None,
-    commit_ref: str,
     snapshot: tuple[str, str, tuple[tuple[str, object], ...]],
+    base_ref: str | None,
+    base_commit: str | None,
+    commit_sha: str | None,
     bundle: str,
     changed_paths: set[str],
 ) -> dict[str, Any]:
     head = snapshot[0]
-    base_ref: str | None = None
-    base_commit: str | None = None
     if target == "commit":
-        validate_git_ref(repo, commit_ref, "commit")
-        reviewed_commit = git(
-            repo,
-            "rev-parse",
-            "--verify",
-            "--end-of-options",
-            f"{commit_ref}^{{commit}}",
-        ).strip()
-    elif target == "branch":
-        assert target_ref
-        validate_git_ref(repo, target_ref, "base")
-        reviewed_commit = head
-        base_ref = target_ref
-        base_commit = git(
-            repo,
-            "rev-parse",
-            "--verify",
-            "--end-of-options",
-            f"{target_ref}^{{commit}}",
-        ).strip()
+        assert commit_sha
+        reviewed_commit = commit_sha
     else:
         reviewed_commit = head
     paths = sorted(changed_paths)
-    changed_paths_digest = sha256_hex("".join(f"{path}\n" for path in paths))
+    # Canonical-JSON encoding is injective even for paths containing
+    # newlines; a plain newline join is not.
+    changed_paths_digest = sha256_hex(canonical_json(paths))
     binding: dict[str, Any] = {
         "mode": target,
         "reviewed_commit": reviewed_commit,
@@ -9001,7 +9000,7 @@ def reject_repo_output_paths(args: argparse.Namespace, repo: Path) -> None:
     for option, value in (
         ("--json-output", args.json_output),
         ("--output", args.output),
-        ("--receipt-output", args.receipt_output),
+        ("--receipt-output", getattr(args, "receipt_output", None)),
     ):
         if not value:
             continue
@@ -9104,6 +9103,11 @@ def main() -> int:
     binding_pairs = parse_binding_pairs(args.bind)
     if binding_pairs and not args.receipt_output:
         raise SystemExit("--bind requires --receipt-output")
+    if args.receipt_output and args.allow_partial_panel:
+        raise SystemExit(
+            "--allow-partial-panel is incompatible with --receipt-output; "
+            "a receipt must attest every configured reviewer"
+        )
     if args.dry_run:
         return 0
 
@@ -9116,14 +9120,23 @@ def main() -> int:
         )
     try:
         review_source_snapshot = source_tree_snapshot(repo)
+        base_ref_name: str | None = None
+        commit_sha: str | None = None
+        if target == "commit":
+            commit_sha = resolve_commit_sha(repo, args.commit, "commit")
+        elif target == "branch":
+            assert target_ref
+            base_ref_name = target_ref
+            target_ref = resolve_commit_sha(repo, target_ref, "base")
         if target == "local":
             bundle, bundle_truncated = local_bundle(repo)
         elif target == "branch":
             assert target_ref
             bundle, bundle_truncated = branch_bundle(repo, target_ref)
         else:
-            bundle, bundle_truncated = commit_bundle(repo, args.commit)
-            target_ref = args.commit
+            assert commit_sha
+            bundle, bundle_truncated = commit_bundle(repo, commit_sha)
+            target_ref = commit_sha
         extra_prompt, prompt_truncated = load_extra_prompt(args, repo)
         datasets, datasets_truncated = load_datasets(args, repo)
         input_truncated = [*bundle_truncated, *prompt_truncated, *datasets_truncated]
@@ -9135,14 +9148,14 @@ def main() -> int:
             extra_prompt,
             datasets,
         )
-        changed_paths = review_paths(repo, target, target_ref, args.commit)
+        changed_paths = review_paths(repo, target, target_ref, commit_sha or args.commit)
         if receipt is not None or args.expect_commit or args.expect_changed_paths_digest:
             target_binding = review_target_binding(
-                repo,
                 target,
-                target_ref,
-                args.commit,
                 review_source_snapshot,
+                base_ref_name,
+                target_ref if target == "branch" else None,
+                commit_sha,
                 bundle,
                 changed_paths,
             )
