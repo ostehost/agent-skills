@@ -111,6 +111,26 @@ print("fake codex garbage ok")
 '''
 
 
+def nan_codex_script() -> str:
+    return r'''#!/usr/bin/env python3
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+sys.stdin.read()
+try:
+    output_path = args[args.index("--output-last-message") + 1]
+except ValueError:
+    output_path = args[args.index("-o") + 1]
+report = (
+    '{"findings": [], "overall_correctness": "patch is correct", '
+    '"overall_explanation": "fake codex nan", "overall_confidence": NaN}'
+)
+Path(output_path).write_text(report)
+print("fake codex nan ok")
+'''
+
+
 def findings_codex_script() -> str:
     return r'''#!/usr/bin/env python3
 import json
@@ -391,6 +411,42 @@ class ReceiptContractTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("--receipt-output must point outside the reviewed repository", result.stderr)
             self.assertFalse(workspace["receipt"].exists())
+
+    @unittest.skipIf(os.name == "nt", "the fake executables are POSIX-only")
+    def test_stdout_echoes_the_artifact_digest_as_a_second_channel(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            workspace = self.make_workspace(Path(tempdir))
+            result = self.run_cli(workspace)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            document = self.load_receipt(workspace)
+            self.assertIn(
+                f"receipt_artifact_digest: {document['artifact_digest']}",
+                result.stdout,
+                "the invoker must be able to pin the digest from the helper's stdout",
+            )
+
+    @unittest.skipIf(os.name == "nt", "the fake executables are POSIX-only")
+    def test_non_finite_report_numbers_refuse_a_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            workspace = self.make_workspace(Path(tempdir), nan_codex_script())
+            result = self.run_cli(workspace)
+            self.assertNotEqual(result.returncode, 0)
+            document = self.load_receipt(workspace)
+            self.assertEqual(document["status"], "error")
+            self.assertEqual(document["error"]["kind"], "invalid_output")
+
+    def test_receipt_write_guard_refuses_non_finite_numbers(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            receipt_path = Path(tempdir) / "receipt.json"
+            receipt = self.helper["ReviewReceipt"](receipt_path, {}, [])
+            bad_report = {"findings": [], "overall_confidence": float("nan")}
+            with self.assertRaisesRegex(SystemExit, "non-finite"):
+                receipt.write("clean", report=bad_report)
+            document = json.loads(receipt_path.read_text(encoding="utf-8"))
+            self.assertEqual(document["status"], "error")
+            self.assertEqual(document["error"]["kind"], "invalid_output")
+            self.assertTrue(self.helper["contains_non_finite_number"](bad_report))
+            self.assertFalse(self.helper["contains_non_finite_number"]({"a": [1.0, 2]}))
 
     @unittest.skipIf(os.name == "nt", "the fake executables are POSIX-only")
     def test_allow_partial_panel_is_rejected_with_receipt_output(self) -> None:

@@ -12,6 +12,7 @@ import functools
 import hashlib
 import io
 import json
+import math
 import os
 import queue
 import re
@@ -729,7 +730,23 @@ SHA256_HEX_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 
 def canonical_json(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    )
+
+
+def contains_non_finite_number(value: Any) -> bool:
+    if isinstance(value, float):
+        return math.isnan(value) or math.isinf(value)
+    if isinstance(value, dict):
+        return any(contains_non_finite_number(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(contains_non_finite_number(item) for item in value)
+    return False
 
 
 def sha256_hex(text: str) -> str:
@@ -836,6 +853,13 @@ class ReviewReceipt:
             return
         if status not in RECEIPT_STATUSES:
             raise AssertionError(f"invalid receipt status: {status}")
+        if report is not None and contains_non_finite_number(report):
+            message = (
+                "review report contains non-finite numbers; "
+                "refusing to mint a receipt from invalid structured output"
+            )
+            self.write_error("invalid_output", message)
+            raise SystemExit(message)
         receipt: dict[str, Any] = {
             "receipt_version": RECEIPT_VERSION,
             "status": status,
@@ -848,6 +872,10 @@ class ReviewReceipt:
         receipt["artifact_digest"] = receipt_artifact_digest(receipt)
         atomic_write_text(self.path, canonical_json(receipt) + "\n")
         self.written = True
+        # Echo the digest on the helper's own stdout as a second channel:
+        # the invoking process reads it directly, so a later rewrite of the
+        # receipt file cannot retroactively match what was announced here.
+        print(f"receipt_artifact_digest: {receipt['artifact_digest']}")
 
     def write_error(self, kind: str, message: str) -> None:
         self.write("error", error={"kind": kind, "message": bounded_field(message, 4000)})

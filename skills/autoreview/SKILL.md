@@ -366,6 +366,8 @@ For machine consumers (closeout gates, workroom adapters) the helper can emit a 
 - `--expect-commit` and `--expect-changed-paths-digest` are checked before any engine runs, so a stale frozen target never spends a review.
 - `--bind` pairs are included in the artifact digest, so a receipt minted for one issue/task/generation tuple cannot be replayed against another without a digest mismatch.
 - `--receipt-output` must point outside the reviewed repository (same rule as `--output`/`--json-output`); `--bind` requires `--receipt-output`; `--dry-run` writes no receipt.
+- Trust model: `artifact_digest` is an integrity and replay binding, not authentication — any writer able to modify the file can recompute it. On success the helper also prints `receipt_artifact_digest: <hex>` on its own stdout; the invoking process must capture that line (or persist the whole receipt into its own trusted store at mint time) and treat the on-disk file afterward as untrusted evidence that can only downgrade a decision, never upgrade one. Keyed authentication, if needed, belongs to the consumer's receipt store, not this portable helper.
+- Report numbers must be finite: a reviewer response carrying NaN/Infinity is refused as `invalid_output` instead of minting a receipt that strict JSON parsers cannot read.
 
 ## Context Efficiency
 
