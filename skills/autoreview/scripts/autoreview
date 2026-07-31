@@ -720,6 +720,233 @@ SCHEMA: dict[str, Any] = {
     },
 }
 
+RECEIPT_VERSION = 1
+RECEIPT_STATUSES = ("clean", "findings", "error")
+RECEIPT_BINDING_KEY_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,64}")
+RECEIPT_BINDING_VALUE_MAX = 500
+FULL_COMMIT_SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
+SHA256_HEX_PATTERN = re.compile(r"[0-9a-f]{64}")
+
+
+def canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def sha256_hex(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def receipt_artifact_digest(receipt: dict[str, Any]) -> str:
+    """Deterministic digest over the receipt with its own digest field blanked.
+
+    Consumers verify a receipt by recomputing sha256 over the canonical JSON
+    (sorted keys, compact separators, ASCII) of the parsed document with
+    "artifact_digest" set to the empty string.
+    """
+    unsigned = {**receipt, "artifact_digest": ""}
+    return sha256_hex(canonical_json(unsigned))
+
+
+def source_snapshot_digest(snapshot: object) -> str:
+    return sha256_hex(canonical_json(snapshot))
+
+
+def parse_binding_pairs(values: list[str] | None) -> dict[str, str]:
+    binding: dict[str, str] = {}
+    for raw in values or []:
+        if "=" not in raw:
+            raise SystemExit(f"--bind requires key=value: {display_escape(raw, 200)}")
+        key, value = raw.split("=", 1)
+        key = key.strip()
+        if not RECEIPT_BINDING_KEY_PATTERN.fullmatch(key):
+            raise SystemExit(
+                "--bind key must be 1-64 characters of [A-Za-z0-9._-]: "
+                f"{display_escape(key, 200)}"
+            )
+        if key in binding:
+            raise SystemExit(f"--bind key repeated: {key}")
+        if len(value) > RECEIPT_BINDING_VALUE_MAX:
+            raise SystemExit(
+                f"--bind value for {key} exceeds {RECEIPT_BINDING_VALUE_MAX} characters"
+            )
+        binding[key] = value
+    return binding
+
+
+def classify_receipt_error(message: str) -> str:
+    if "source changed" in message:
+        return "source_mutation"
+    if (
+        is_structured_output_failure(message)
+        or "unexpected JSON shape" in message
+        or "structured output validation failed" in message
+        or "review JSON" in message
+    ):
+        return "invalid_output"
+    if (
+        "engine failed" in message
+        or "engine is unavailable" in message
+        or "engine refused" in message
+        or "review engine" in message
+    ):
+        return "engine_failure"
+    return "helper_failure"
+
+
+class ReviewReceipt:
+    """Versioned, digest-bound review receipt written on every outcome.
+
+    Fail-closed contract: reviewer startup/auth/transport failure, invalid
+    structured output, source mutation, and target/scope mismatch all write
+    status "error" — never "clean". A missing receipt file must also be
+    treated as an error by consumers, never as a clean review.
+    """
+
+    def __init__(
+        self,
+        path: Path,
+        binding: dict[str, str],
+        reviewers: list[argparse.Namespace],
+    ) -> None:
+        self.path = path
+        self.binding = binding
+        self.reviewers = reviewers
+        self.target: dict[str, Any] | None = None
+        self.written = False
+
+    def reviewer_entries(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "engine": reviewer.engine,
+                "model": reviewer.model,
+                "model_used": getattr(reviewer, "model_used", None),
+                "fallback_model": getattr(reviewer, "fallback_model", None),
+                "thinking": reviewer.thinking,
+            }
+            for reviewer in self.reviewers
+        ]
+
+    def write(
+        self,
+        status: str,
+        report: dict[str, Any] | None = None,
+        error: dict[str, str] | None = None,
+    ) -> None:
+        if self.written:
+            return
+        if status not in RECEIPT_STATUSES:
+            raise AssertionError(f"invalid receipt status: {status}")
+        receipt: dict[str, Any] = {
+            "receipt_version": RECEIPT_VERSION,
+            "status": status,
+            "reviewers": self.reviewer_entries(),
+            "target": self.target,
+            "binding": self.binding,
+            "report": report,
+            "error": error,
+        }
+        receipt["artifact_digest"] = receipt_artifact_digest(receipt)
+        atomic_write_text(self.path, canonical_json(receipt) + "\n")
+        self.written = True
+
+    def write_error(self, kind: str, message: str) -> None:
+        self.write("error", error={"kind": kind, "message": bounded_field(message, 4000)})
+
+
+def review_target_binding(
+    repo: Path,
+    target: str,
+    target_ref: str | None,
+    commit_ref: str,
+    snapshot: tuple[str, str, tuple[tuple[str, object], ...]],
+    bundle: str,
+    changed_paths: set[str],
+) -> dict[str, Any]:
+    head = snapshot[0]
+    base_ref: str | None = None
+    base_commit: str | None = None
+    if target == "commit":
+        validate_git_ref(repo, commit_ref, "commit")
+        reviewed_commit = git(
+            repo,
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            f"{commit_ref}^{{commit}}",
+        ).strip()
+    elif target == "branch":
+        assert target_ref
+        validate_git_ref(repo, target_ref, "base")
+        reviewed_commit = head
+        base_ref = target_ref
+        base_commit = git(
+            repo,
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            f"{target_ref}^{{commit}}",
+        ).strip()
+    else:
+        reviewed_commit = head
+    paths = sorted(changed_paths)
+    changed_paths_digest = sha256_hex("".join(f"{path}\n" for path in paths))
+    binding: dict[str, Any] = {
+        "mode": target,
+        "reviewed_commit": reviewed_commit,
+        "base_ref": base_ref,
+        "base_commit": base_commit,
+        "tree_digest": source_snapshot_digest(snapshot) if target == "local" else None,
+        "bundle_digest": sha256_hex(bundle),
+        "changed_paths": paths,
+        "changed_paths_digest": changed_paths_digest,
+    }
+    binding["scope_digest"] = sha256_hex(
+        canonical_json(
+            {
+                "mode": binding["mode"],
+                "reviewed_commit": binding["reviewed_commit"],
+                "base_commit": binding["base_commit"],
+                "tree_digest": binding["tree_digest"],
+                "bundle_digest": binding["bundle_digest"],
+                "changed_paths_digest": changed_paths_digest,
+            }
+        )
+    )
+    return binding
+
+
+def enforce_review_expectations(
+    args: argparse.Namespace,
+    target_binding: dict[str, Any],
+    receipt: "ReviewReceipt | None",
+) -> None:
+    if args.expect_commit:
+        expected = args.expect_commit.strip().lower()
+        if not FULL_COMMIT_SHA_PATTERN.fullmatch(expected):
+            raise SystemExit("--expect-commit must be a full 40-hex commit sha")
+        actual = target_binding["reviewed_commit"]
+        if expected != actual:
+            message = (
+                f"reviewed commit {actual} does not match --expect-commit {expected}; "
+                "the frozen review target is stale"
+            )
+            if receipt is not None:
+                receipt.write_error("target_mismatch", message)
+            raise SystemExit(message)
+    if args.expect_changed_paths_digest:
+        expected = args.expect_changed_paths_digest.strip().lower()
+        if not SHA256_HEX_PATTERN.fullmatch(expected):
+            raise SystemExit("--expect-changed-paths-digest must be a 64-hex sha256")
+        actual = target_binding["changed_paths_digest"]
+        if expected != actual:
+            message = (
+                f"changed-path digest {actual} does not match "
+                f"--expect-changed-paths-digest {expected}; the frozen review scope is stale"
+            )
+            if receipt is not None:
+                receipt.write_error("scope_mismatch", message)
+            raise SystemExit(message)
+
 
 def run(
     args: list[str],
@@ -6400,6 +6627,7 @@ def run_codex(args: argparse.Namespace, repo: Path, prompt: str) -> str:
                 )
                 output = output_path.read_text()
                 if result.returncode == 0:
+                    args.model_used = model
                     return output or result.stdout
                 if (
                     index == 0
@@ -8164,6 +8392,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", help="Write human output to a file as well as stdout.")
     parser.add_argument("--json-output", help="Write validated structured review JSON.")
     parser.add_argument(
+        "--receipt-output",
+        help="Write a versioned, digest-bound review receipt JSON (status clean, findings, or error; written on failure paths too, never clean on failure).",
+    )
+    parser.add_argument(
+        "--bind",
+        action="append",
+        help="Opaque key=value binding echoed into the receipt and its artifact digest (repeatable; requires --receipt-output).",
+    )
+    parser.add_argument(
+        "--expect-commit",
+        help="Fail closed unless the resolved reviewed commit equals this full 40-hex sha.",
+    )
+    parser.add_argument(
+        "--expect-changed-paths-digest",
+        help="Fail closed unless the computed changed-path digest equals this 64-hex sha256.",
+    )
+    parser.add_argument(
         "--stream-engine-output",
         action="store_true",
         default=os.environ.get("AUTOREVIEW_STREAM_ENGINE_OUTPUT") == "1",
@@ -8756,6 +9001,7 @@ def reject_repo_output_paths(args: argparse.Namespace, repo: Path) -> None:
     for option, value in (
         ("--json-output", args.json_output),
         ("--output", args.output),
+        ("--receipt-output", args.receipt_output),
     ):
         if not value:
             continue
@@ -8855,97 +9101,141 @@ def main() -> int:
     display_ref = args.commit if target == "commit" else target_ref
     if display_ref:
         print(f"ref: {display_ref}")
+    binding_pairs = parse_binding_pairs(args.bind)
+    if binding_pairs and not args.receipt_output:
+        raise SystemExit("--bind requires --receipt-output")
     if args.dry_run:
         return 0
 
-    review_source_snapshot = source_tree_snapshot(repo)
-    if target == "local":
-        bundle, bundle_truncated = local_bundle(repo)
-    elif target == "branch":
-        assert target_ref
-        bundle, bundle_truncated = branch_bundle(repo, target_ref)
-    else:
-        bundle, bundle_truncated = commit_bundle(repo, args.commit)
-        target_ref = args.commit
-    extra_prompt, prompt_truncated = load_extra_prompt(args, repo)
-    datasets, datasets_truncated = load_datasets(args, repo)
-    input_truncated = [*bundle_truncated, *prompt_truncated, *datasets_truncated]
-    prompt = build_prompt(
-        repo,
-        target,
-        target_ref,
-        bundle,
-        extra_prompt,
-        datasets,
-    )
-    changed_paths = review_paths(repo, target, target_ref, args.commit)
-    print(f"bundle: {len(prompt)} chars")
-    if source_tree_snapshot(repo) != review_source_snapshot:
-        raise SystemExit(
-            "source changed while the review bundle was being created; "
-            "rerun autoreview against the updated tree"
+    receipt: ReviewReceipt | None = None
+    if args.receipt_output:
+        receipt = ReviewReceipt(
+            Path(args.receipt_output).expanduser(),
+            binding_pairs,
+            reviewers,
         )
-
-    tests_proc: tuple[subprocess.Popen, float] | None = None
-    if args.parallel_tests:
-        tests_proc = start_parallel_tests(args.parallel_tests, repo, args.parallel_tests_shell)
     try:
-        if len(reviewers) == 1:
-            report = run_reviewer(
-                reviewers[0],
-                repo,
-                prompt,
-                changed_paths,
-                args.require_finding,
-                input_truncated,
-            )
-            label = "autoreview"
+        review_source_snapshot = source_tree_snapshot(repo)
+        if target == "local":
+            bundle, bundle_truncated = local_bundle(repo)
+        elif target == "branch":
+            assert target_ref
+            bundle, bundle_truncated = branch_bundle(repo, target_ref)
         else:
-            report = run_panel(args, reviewers, repo, prompt, changed_paths, input_truncated)
-            label = "autoreview panel"
-    except BaseException:
-        # A failed review must not block forever on a still-running test
-        # command; give it a bounded window, then kill it.
-        if tests_proc:
-            finish_parallel_tests(*tests_proc, timeout=10)
-        raise
-    tests_status = finish_parallel_tests(*tests_proc) if tests_proc else 0
-
-    if source_tree_snapshot(repo) != review_source_snapshot:
-        print(
-            "source changed after the review bundle was created; "
-            "rerun autoreview against the updated tree",
-            file=sys.stderr,
+            bundle, bundle_truncated = commit_bundle(repo, args.commit)
+            target_ref = args.commit
+        extra_prompt, prompt_truncated = load_extra_prompt(args, repo)
+        datasets, datasets_truncated = load_datasets(args, repo)
+        input_truncated = [*bundle_truncated, *prompt_truncated, *datasets_truncated]
+        prompt = build_prompt(
+            repo,
+            target,
+            target_ref,
+            bundle,
+            extra_prompt,
+            datasets,
         )
-        return 1
+        changed_paths = review_paths(repo, target, target_ref, args.commit)
+        if receipt is not None or args.expect_commit or args.expect_changed_paths_digest:
+            target_binding = review_target_binding(
+                repo,
+                target,
+                target_ref,
+                args.commit,
+                review_source_snapshot,
+                bundle,
+                changed_paths,
+            )
+            if receipt is not None:
+                receipt.target = target_binding
+            enforce_review_expectations(args, target_binding, receipt)
+        print(f"bundle: {len(prompt)} chars")
+        if source_tree_snapshot(repo) != review_source_snapshot:
+            raise SystemExit(
+                "source changed while the review bundle was being created; "
+                "rerun autoreview against the updated tree"
+            )
 
-    if args.json_output:
-        atomic_write_text(
-            Path(args.json_output),
-            json.dumps(report, indent=2) + "\n",
-        )
-
-    if args.output:
-        rendered = io.StringIO()
-        original_stdout = sys.stdout
+        tests_proc: tuple[subprocess.Popen, float] | None = None
+        if args.parallel_tests:
+            tests_proc = start_parallel_tests(args.parallel_tests, repo, args.parallel_tests_shell)
         try:
-            sys.stdout = rendered
-            print_report(report, label=label)
-        finally:
-            sys.stdout = original_stdout
-        output = rendered.getvalue()
-        print(output, end="")
-        atomic_write_text(Path(args.output), output)
-    else:
-        print_report(report, label=label)
+            if len(reviewers) == 1:
+                report = run_reviewer(
+                    reviewers[0],
+                    repo,
+                    prompt,
+                    changed_paths,
+                    args.require_finding,
+                    input_truncated,
+                )
+                label = "autoreview"
+            else:
+                report = run_panel(args, reviewers, repo, prompt, changed_paths, input_truncated)
+                label = "autoreview panel"
+        except BaseException:
+            # A failed review must not block forever on a still-running test
+            # command; give it a bounded window, then kill it.
+            if tests_proc:
+                finish_parallel_tests(*tests_proc, timeout=10)
+            raise
+        tests_status = finish_parallel_tests(*tests_proc) if tests_proc else 0
 
-    has_findings = bool(report["findings"])
-    overall_incorrect = report["overall_correctness"] == "patch is incorrect"
-    if tests_status != 0:
-        return 1
-    if args.expect_findings:
-        return 0 if has_findings else 1
-    return 1 if has_findings or overall_incorrect else 0
+        if source_tree_snapshot(repo) != review_source_snapshot:
+            message = (
+                "source changed after the review bundle was created; "
+                "rerun autoreview against the updated tree"
+            )
+            if receipt is not None:
+                receipt.write_error("source_mutation", message)
+            print(message, file=sys.stderr)
+            return 1
+
+        if args.json_output:
+            atomic_write_text(
+                Path(args.json_output),
+                json.dumps(report, indent=2) + "\n",
+            )
+
+        if args.output:
+            rendered = io.StringIO()
+            original_stdout = sys.stdout
+            try:
+                sys.stdout = rendered
+                print_report(report, label=label)
+            finally:
+                sys.stdout = original_stdout
+            output = rendered.getvalue()
+            print(output, end="")
+            atomic_write_text(Path(args.output), output)
+        else:
+            print_report(report, label=label)
+
+        has_findings = bool(report["findings"])
+        overall_incorrect = report["overall_correctness"] == "patch is incorrect"
+        if tests_status != 0:
+            if receipt is not None:
+                receipt.write_error(
+                    "parallel_tests_failed",
+                    "parallel test command failed; review result withheld from receipt",
+                )
+            return 1
+        if receipt is not None:
+            receipt.write(
+                "findings" if has_findings or overall_incorrect else "clean",
+                report=report,
+            )
+        if args.expect_findings:
+            return 0 if has_findings else 1
+        return 1 if has_findings or overall_incorrect else 0
+    except BaseException as exc:
+        if receipt is not None and not receipt.written:
+            if isinstance(exc, SystemExit) and isinstance(exc.code, str):
+                message = exc.code
+            else:
+                message = str(exc) or exc.__class__.__name__
+            receipt.write_error(classify_receipt_error(message), message)
+        raise
 
 
 def sanitized_main() -> int:

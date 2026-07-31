@@ -346,6 +346,25 @@ Codex `--ignore-user-config` skips config loading for the exec run. Autoreview r
 
 Codex uses a named permission profile that grants read access only to an empty temporary workspace. This is narrower than repository-root access, which would expose ignored credentials, and narrower than the legacy `read-only` sandbox, which permits reads across the host filesystem.
 
+## Receipt-Bound Output
+
+For machine consumers (closeout gates, workroom adapters) the helper can emit a versioned, digest-bound review receipt in addition to the human report:
+
+```bash
+"$AUTOREVIEW" --mode commit --commit <sha> \
+  --receipt-output /outside/repo/receipt.json \
+  --bind issue=PAR-123 --bind task_id=t1 --bind task_generation=gen-1 \
+  --expect-commit <full-40-hex-sha> \
+  --expect-changed-paths-digest <64-hex-sha256>
+```
+
+- The receipt is `receipt_version: 1` JSON with `status` `clean` | `findings` | `error`, the reviewer list (engine, requested model, actually used Codex model, thinking), a target binding (`mode`, resolved `reviewed_commit`, `base_commit`, `bundle_digest`, sorted `changed_paths` + `changed_paths_digest`, local-mode `tree_digest`, and a combined `scope_digest`), the opaque `--bind` pairs, the validated report (non-error only), and an `artifact_digest`.
+- `artifact_digest` is sha256 over the canonical JSON (sorted keys, compact separators, ASCII) of the receipt with `artifact_digest` set to the empty string. Consumers must recompute it before trusting a receipt.
+- Fail closed: reviewer startup/auth/transport failure, invalid structured output, source mutation after the bundle freeze, `--expect-commit` / `--expect-changed-paths-digest` mismatch, and `--parallel-tests` failure all write `status: "error"` and exit nonzero. An error receipt never carries a report. A missing receipt file is an error, never a clean review.
+- `--expect-commit` and `--expect-changed-paths-digest` are checked before any engine runs, so a stale frozen target never spends a review.
+- `--bind` pairs are included in the artifact digest, so a receipt minted for one issue/task/generation tuple cannot be replayed against another without a digest mismatch.
+- `--receipt-output` must point outside the reviewed repository (same rule as `--output`/`--json-output`); `--bind` requires `--receipt-output`; `--dry-run` writes no receipt.
+
 ## Context Efficiency
 
 Run the helper directly so target selection, engine choice, structured validation, and exit status all stay in one path. If output is noisy, summarize the completed helper output after it returns; do not ask another agent or reviewer to rerun the review.
@@ -387,7 +406,8 @@ The helper:
 - resolves bare `git`, `gh`, reviewer, and PowerShell shell commands from absolute `PATH` entries only, never from the reviewed checkout; explicit `--*-bin` paths are interpreted from the reviewed repository root when relative and accepted only when both the supplied path and resolved target stay outside the reviewed repository
 - use `--mode commit --commit <ref>` for already-committed work, especially clean `main` after landing
 - should be left in `--mode auto` or forced to `--mode branch` for PR/branch work; do not force `--mode local` after committing
-- writes the review report to stdout, and to files only when `--output` or `--json-output` is set; progress and diagnostics (heartbeats, fallback and retry notices, ignored-finding dumps, streamed engine output) go to stderr
+- writes the review report to stdout, and to files only when `--output`, `--json-output`, or `--receipt-output` is set; progress and diagnostics (heartbeats, fallback and retry notices, ignored-finding dumps, streamed engine output) go to stderr
+- supports a digest-bound receipt contract via `--receipt-output`, `--bind`, `--expect-commit`, and `--expect-changed-paths-digest` (see Receipt-Bound Output)
 - supports `--dry-run`, `--parallel-tests`, `--parallel-tests-shell`, `--prompt`, repo-relative `--prompt-file`, repo-relative `--dataset`, `--no-tools`, `--no-web-search`, repeatable Codex-only safe model/response tuning with `--codex-config key=value`, Codex-only `--codex-speed fast|flex|default`, and commit refs
 - supports `--stream-engine-output` or `AUTOREVIEW_STREAM_ENGINE_OUTPUT=1` for live engine text while preserving structured validation; Codex and Claude hide tool/file event details, emit compact activity summaries, and report usage at turn completion
 - supports opt-in review panels with `--panel` / `--reviewers`, plus per-engine `--model`, `--thinking`, and Claude `--fallback-model`
