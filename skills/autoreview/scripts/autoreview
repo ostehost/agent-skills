@@ -834,23 +834,42 @@ def sha256_hex(data: str | bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def verify_receipt_document(envelope: dict[str, Any]) -> dict[str, Any]:
-    """Verify a parsed receipt envelope and return its authenticated payload.
+def verify_receipt_document(
+    envelope: dict[str, Any],
+    expected_digest: str | None = None,
+) -> dict[str, Any]:
+    """Verify a parsed receipt envelope and return its payload.
 
     The artifact digest is byte-pinned: sha256 over the UTF-8 bytes of the
     stored "payload" string exactly as any JSON parser returns it. Consumers
     never re-serialize anything, so language-specific JSON formatting cannot
     change the digest.
+
+    Authentication requires expected_digest — the trusted digest the caller
+    pinned from the helper's stdout or its own receipt store. Without it,
+    this is only a self-consistency check: anyone able to rewrite the file
+    can recompute the embedded digest, so a self-consistent receipt is not
+    an authenticated one.
     """
     payload_text = envelope.get("payload")
     if not isinstance(payload_text, str):
         raise SystemExit("receipt envelope has no payload string")
-    if sha256_hex(payload_text) != envelope.get("artifact_digest"):
+    payload_digest = sha256_hex(payload_text)
+    if payload_digest != envelope.get("artifact_digest"):
         raise SystemExit("receipt artifact digest does not match its payload bytes")
+    if expected_digest is not None and payload_digest != expected_digest:
+        raise SystemExit(
+            "receipt artifact digest does not match the trusted pinned digest"
+        )
+    if envelope.get("receipt_version") != RECEIPT_VERSION:
+        raise SystemExit(
+            f"unsupported receipt version: {envelope.get('receipt_version')!r} "
+            f"(expected {RECEIPT_VERSION})"
+        )
     payload = json.loads(payload_text)
     if not isinstance(payload, dict):
         raise SystemExit("receipt payload is not an object")
-    if payload.get("receipt_version") != envelope.get("receipt_version"):
+    if payload.get("receipt_version") != RECEIPT_VERSION:
         raise SystemExit("receipt payload/envelope version mismatch")
     return payload
 
@@ -1012,7 +1031,11 @@ def review_target_binding(
         reviewed_commit = commit_sha
     else:
         reviewed_commit = head
-    paths = sorted(changed_paths)
+    # Sort by UTF-16 code units — the same ordering JCS mandates for object
+    # keys and the default ECMAScript string sort — so a consumer sorting the
+    # paths in another runtime derives the identical array. Python's default
+    # code-point sort diverges for astral-plane filenames.
+    paths = sorted(changed_paths, key=lambda path: path.encode("utf-16-be"))
     # JCS array-of-strings encoding is injective even for paths containing
     # newlines; a plain newline join is not.
     changed_paths_digest = sha256_hex(canonical_bytes(paths))

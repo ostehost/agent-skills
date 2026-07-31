@@ -617,7 +617,7 @@ class ReceiptContractTests(unittest.TestCase):
                     "receipt_version": 2,
                 }
             )
-        with self.assertRaisesRegex(SystemExit, "version mismatch"):
+        with self.assertRaisesRegex(SystemExit, "unsupported receipt version"):
             verify(
                 {
                     "artifact_digest": digest,
@@ -625,8 +625,82 @@ class ReceiptContractTests(unittest.TestCase):
                     "receipt_version": 1,
                 }
             )
+        with self.assertRaisesRegex(SystemExit, "unsupported receipt version"):
+            verify({"artifact_digest": digest, "payload": payload_text})
+        mismatched_payload = '{"status":"error"}'
+        with self.assertRaisesRegex(SystemExit, "version mismatch"):
+            verify(
+                {
+                    "artifact_digest": hashlib.sha256(mismatched_payload.encode("utf-8")).hexdigest(),
+                    "payload": mismatched_payload,
+                    "receipt_version": 2,
+                }
+            )
         with self.assertRaisesRegex(SystemExit, "no payload string"):
             verify({"artifact_digest": digest, "receipt_version": 2})
+
+    def test_verify_receipt_document_authenticates_against_trusted_pin(self) -> None:
+        verify = self.helper["verify_receipt_document"]
+        payload_text = '{"receipt_version":2,"status":"clean"}'
+        digest = hashlib.sha256(payload_text.encode("utf-8")).hexdigest()
+        envelope = {
+            "artifact_digest": digest,
+            "payload": payload_text,
+            "receipt_version": 2,
+        }
+        self.assertEqual(verify(envelope, digest)["status"], "clean")
+        with self.assertRaisesRegex(SystemExit, "trusted pinned digest"):
+            verify(envelope, "0" * 64)
+
+    def test_changed_paths_sort_by_utf16_code_units(self) -> None:
+        snapshot = ("0" * 40, "", ())
+        binding = self.helper["review_target_binding"](
+            "local", snapshot, None, None, None, "bundle",
+            {"�.txt", "\U0001f600.txt", "a.txt"},
+        )
+        # U+1F600's first UTF-16 code unit (0xD83D) sorts before U+FFFD,
+        # although its code point is larger; Python's default sort would
+        # order these the other way around.
+        self.assertEqual(
+            binding["changed_paths"],
+            ["a.txt", "\U0001f600.txt", "�.txt"],
+        )
+
+    @unittest.skipUnless(shutil.which("node"), "node runtime unavailable")
+    def test_node_derives_identical_changed_paths_digest(self) -> None:
+        unsorted_paths = ["�.txt", "a.txt", "\U0001f600.txt"]
+        snapshot = ("0" * 40, "", ())
+        binding = self.helper["review_target_binding"](
+            "local", snapshot, None, None, None, "bundle", set(unsorted_paths)
+        )
+        script = (
+            NODE_JCS_FUNCTION
+            + """
+const crypto = require("crypto");
+let raw = "";
+process.stdin.on("data", (chunk) => { raw += chunk; });
+process.stdin.on("end", () => {
+  const paths = JSON.parse(raw);
+  paths.sort();
+  const digest = crypto.createHash("sha256")
+    .update(Buffer.from(jcs(paths), "utf8")).digest("hex");
+  process.stdout.write(digest);
+});
+"""
+        )
+        result = subprocess.run(
+            ["node", "-e", script],
+            input=json.dumps(unsorted_paths),
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        self.assertEqual(
+            result.stdout.strip(),
+            binding["changed_paths_digest"],
+            "a consumer sorting paths with the default ECMAScript sort must "
+            "derive the identical changed-paths digest",
+        )
 
     def test_jcs_canonical_bytes_vectors(self) -> None:
         canonical = self.helper["canonical_bytes"]
