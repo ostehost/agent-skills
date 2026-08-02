@@ -8,11 +8,26 @@ actually lands unnoticed is:
   1. DELETION BY REPLACEMENT - a symbol exists only in the fork, so resolving a file
      as "take upstream" removes it silently. No conflict marker, no failing test if
      nothing referenced it.
+
+     Classified THREE ways against the merge base, because "absent upstream" has two
+     very different causes. A symbol the fork INVENTED must survive the merge. A symbol
+     that was in the merge base and upstream DELETED is a supersession, and dropping it
+     is usually correct. The 2026-08-02 sync found exactly one of the latter
+     (unified_diff_metadata, superseded by redact_deletion_only_secret_values) sitting
+     in a list of 16 -- a two-way fork-vs-upstream diff calls it a fork feature and is
+     wrong.
+
   2. SIGNATURE DRIFT - a function exists on both sides with a different signature or
      return type. If some call sites conflict and others auto-merge, a resolution can
      mix the two conventions and produce a runtime TypeError git never warned about.
 
-Both are found by diffing the two sides' ASTs, not their text.
+  3. NEW OPTIONS WITH RESTRICTIVE DEFAULTS - upstream adds a CLI flag whose default
+     narrows existing behaviour. Nothing conflicts and nothing fails to import, but
+     runs behave differently and fixtures written before the flag quietly stop
+     matching. The 2026-08-02 sync hit this with --max-priority (default P0), which
+     filtered out the P1 findings three fork-only tests depended on.
+
+All three are found by diffing ASTs, not text.
 
 Runs entirely read-only: `git merge-tree --write-tree` computes the merge in the object
 store without touching the worktree or the index. Nothing here mutates the repository.
@@ -72,6 +87,31 @@ def top_level_defs(source: str) -> dict[str, str]:
                 for a in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]
             )
             out[node.name] = f"({params}) -> {returns}"
+    return out
+
+
+def cli_options(source: str) -> dict[str, str]:
+    """Map every add_argument() option string to its `default=` expression."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return {}
+    out: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        if node.func.attr != "add_argument" or not node.args:
+            continue
+        first = node.args[0]
+        if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
+            continue
+        if not first.value.startswith("-"):
+            continue
+        default = next(
+            (ast.unparse(kw.value) for kw in node.keywords if kw.arg == "default"),
+            "<no default>",
+        )
+        out[first.value] = default
     return out
 
 
@@ -139,8 +179,10 @@ def main() -> int:
         if line.strip()
     }
 
-    deletions: list[tuple[str, list[str]]] = []
+    fork_added: list[tuple[str, list[str]]] = []
+    superseded: list[tuple[str, list[str]]] = []
     drift: list[tuple[str, list[tuple[str, str, str]]]] = []
+    new_options: list[tuple[str, list[tuple[str, str]]]] = []
 
     for path in sorted(changed):
         up_src, fork_src = blob(ref, path), blob("HEAD", path)
@@ -148,13 +190,20 @@ def main() -> int:
             continue  # added or removed wholesale; git handles those visibly
         if not (looks_like_python(path, fork_src) and looks_like_python(path, up_src)):
             continue
+        base_src = blob(base, path) or ""
         fork_defs, up_defs = top_level_defs(fork_src), top_level_defs(up_src)
+        base_defs = top_level_defs(base_src)
         if not fork_defs:
             continue
 
+        # "Absent upstream" has two causes with opposite resolutions. Split them.
         gone = sorted(set(fork_defs) - set(up_defs))
-        if gone:
-            deletions.append((path, gone))
+        invented = [n for n in gone if n not in base_defs]
+        removed = [n for n in gone if n in base_defs]
+        if invented:
+            fork_added.append((path, invented))
+        if removed:
+            superseded.append((path, removed))
 
         changed_sigs = [
             (name, fork_defs[name], up_defs[name])
@@ -164,13 +213,33 @@ def main() -> int:
         if changed_sigs:
             drift.append((path, changed_sigs))
 
-    print("\nSILENT TRAP 1 -- fork-only symbols (a 'take upstream' resolution deletes these)")
-    if not deletions:
+        fork_opts, up_opts = cli_options(fork_src), cli_options(up_src)
+        added_opts = sorted(
+            (opt, up_opts[opt]) for opt in set(up_opts) - set(fork_opts)
+        )
+        changed_defaults = sorted(
+            (opt, f"{fork_opts[opt]} -> {up_opts[opt]}")
+            for opt in set(up_opts) & set(fork_opts)
+            if fork_opts[opt] != up_opts[opt]
+        )
+        if added_opts or changed_defaults:
+            new_options.append((path, added_opts + changed_defaults))
+
+    print("\nSILENT TRAP 1a -- FORK-ADDED symbols (a 'take upstream' resolution deletes these)")
+    if not fork_added:
         print("  (none)")
-    for path, names in deletions:
+    for path, names in fork_added:
         print(f"  {path}")
         for name in names:
             print(f"      - {name}")
+
+    print("\nSILENT TRAP 1b -- UPSTREAM-DELETED symbols (supersessions; dropping is usually right)")
+    if not superseded:
+        print("  (none)")
+    for path, names in superseded:
+        print(f"  {path}")
+        for name in names:
+            print(f"      - {name}  (present in merge base; upstream removed it)")
 
     print("\nSILENT TRAP 2 -- signature drift (may auto-merge into a mixed convention)")
     if not drift:
@@ -181,6 +250,14 @@ def main() -> int:
             print(f"      {name}")
             print(f"          fork:     {fork_sig}")
             print(f"          upstream: {up_sig}")
+
+    print("\nSILENT TRAP 3 -- new/changed CLI defaults (narrow behaviour without failing)")
+    if not new_options:
+        print("  (none)")
+    for path, opts in new_options:
+        print(f"  {path}")
+        for opt, default in opts:
+            print(f"      {opt:<28} default: {default}")
 
     print("\nNext: docs/UPSTREAM-SYNC.md -- resolution policy and the authorization this needs.")
     return 0

@@ -57,7 +57,7 @@ an arbitrary SHA into a matching ref name and mint themselves merge authority.
     git fetch upstream
     scripts/upstream-survey
 
-Reports drift, the marked conflict surface, and both silent traps below. It uses
+Reports drift, the marked conflict surface, and traps 1a/1b/2/3 below. It uses
 `git merge-tree --write-tree`, which computes the merge in the object store without
 touching the worktree or index. Safe to run at any time, including mid-investigation.
 
@@ -75,7 +75,7 @@ Enable `rerere` so an abandoned attempt does not cost the resolutions twice:
 
 ### 3. Authorize
 
-Present the owner with: the drift, the conflict surface, the survey's two trap sections, and
+Present the owner with: the drift, the conflict surface, the survey's trap sections, and
 the explicit statement that one merge commit will exist on `main` permanently. Do not
 describe a workaround as hook-legal — if it reaches a denied topology, say so.
 
@@ -87,69 +87,96 @@ describe a workaround as hook-legal — if it reaches a denied topology, say so.
 | Upstream-only additions (e.g. `skills/beam`) | Take upstream wholesale. |
 | Inventory files (`README.md`, `skills.sh.json`, `AGENTS.md`) | Union, then reconcile by hand. `scripts/validate-skills` is the arbiter: it enforces that `skills.sh.json` references only existing skills, each in at most one grouping. |
 | `.github/workflows/validate.yml` | Take upstream's structure, re-apply the fork's steps (design-competition suites, the extra test modules). Then mirror the result into `scripts/run-checks` — the `python tests` module list must stay byte-identical between the two. |
-| `skills/autoreview/scripts/autoreview` | Ownership transfer — see below. |
+| `skills/autoreview/scripts/autoreview` | Expect a competing rewrite; write the union by hand — see below. |
 
 ### 5. Verify
 
     scripts/run-checks          # must be fully green
     scripts/upstream-survey     # drift should now read 0 behind
 
-Then confirm the invariant anchors below by hand.
+Then confirm the invariant anchors below by hand. Traps 4 and 5 surface only here, so a
+red suite after a clean-looking resolution is expected — read each failure before assuming
+the resolution was wrong.
 
 ### 6. Record
 
 Append to the log at the bottom of this file and re-run the survey to refresh the pins.
 
-## The two silent traps
+## The silent traps
 
 Marked conflicts get read by whoever resolves them. These produce **no conflict marker**,
-which is why they are the ones that land unnoticed. `scripts/upstream-survey` detects both
-by diffing ASTs rather than text, and it scans **every** changed Python file, not only the
-conflicted ones — a clean auto-merge is exactly where this damage hides.
+which is why they are the ones that land unnoticed. `scripts/upstream-survey` detects them by
+diffing ASTs rather than text, and it scans **every** changed Python file, not only the
+conflicted ones -- a clean auto-merge is exactly where this damage hides.
 
-**Trap 1 — deletion by replacement.** A symbol exists only in the fork, so resolving a file
-as "take upstream" removes it silently, with no failing test if nothing referenced it. As of
-2026-08-02 there are **16** such functions in `skills/autoreview/scripts/autoreview`. An
-eyeballed review found 6 of them; the tool found all 16. Never hand-enumerate this.
+**Trap 1a -- fork-added symbols.** The fork invented them, so resolving a file as "take
+upstream" removes them silently. Never hand-enumerate this: before the 2026-08-02 sync an
+eyeballed review found 6 of the 15 in `skills/autoreview/scripts/autoreview`.
 
-**Trap 2 — signature drift.** A function exists on both sides with different parameters or
-return type. If some call sites conflict and others auto-merge, a resolution can mix the two
-conventions. The live examples:
+**Trap 1b -- upstream-deleted symbols.** Also absent upstream, but for the opposite reason:
+they were in the merge base and upstream removed them. Dropping these is usually *correct*.
+The 2026-08-02 sync found exactly one, `unified_diff_metadata`, superseded by
+`redact_deletion_only_secret_values`. A two-way fork-vs-upstream diff calls it a fork feature
+and is wrong -- always classify against the merge base.
 
-- **Truncation type.** Five producers (`local_bundle`, `branch_bundle`, `commit_bundle`,
-  `load_extra_prompt`, `load_datasets`) return `tuple[str, list[str]]` here and
-  `tuple[str, bool]` upstream. `main()` composes them with `[*a, *b, *c]` here versus
-  `a or b or c` upstream. Splatting a `bool` is a runtime `TypeError`.
-- **Parameter threading.** Upstream threads `javascript_dialect: str | None` through the
-  whole secret-risk chain (`secret_text_risk`, `secret_literal_risk`, `call_arguments_risk`,
-  `fallback_secret_risk`, `require_no_secret_values`, `safe_secret_*_suffix`) and
-  `known_secret_fragments_out: set[str] | None` through the bundle and patch chain.
-  `validate_review_patch` gains four parameters. Take a callee's new signature without its
-  call sites and you get a `TypeError` git never warned about.
+**Trap 2 -- signature drift.** A function exists on both sides with different parameters or
+return type. If some call sites conflict and others auto-merge, a resolution mixes conventions.
 
-Both are pinned by `skills/autoreview/tests/test_merge_invariants.py`, which is gated. Every
-assertion in it was mutation-tested: reverting a producer to upstream's `bool`, switching
-`main()` to `or`, renaming a fork-only function, and swapping the UTF-16BE key sort for a
-plain one each turn the suite red. Delete that file once the fork tracks upstream again.
+> Not hypothetical. During the 2026-08-02 merge the three `*_bundle` functions conflicted and
+> took upstream's `bool`, while `load_extra_prompt` and `load_datasets` auto-merged silently
+> and kept the fork's `list[str]`. `main()` ended up combining both.
+> `test_merge_invariants` caught it; nothing else would have.
 
-## `skills/autoreview/scripts/autoreview` — ownership transfer, not a hand-merge
+Drift also reaches *tests*, which the tool does not scan. Upstream threaded
+`known_secret_fragments_out` through `commit_bundle`, and a fork-only test stubbed it with the
+old 2-arg signature -- a `TypeError` at run time, not merge time. After any drift is reported,
+grep fork-only tests for stubs and `Namespace(...)` literals of the changed functions.
 
-14 of the 23 hunks are in this one file, and upstream has 56 commits to the fork's 11 since
-the merge-base. Do not hand-merge it. **Take upstream's file wholesale, then re-apply the
-fork's receipt layer** using the gated `test_receipt_contract` suite (32 tests) as its
-specification. The 16 fork-only functions listed by the survey are the re-application
-checklist.
+**Trap 3 -- new options with restrictive defaults.** Upstream adds a CLI flag whose default
+narrows existing behaviour. Nothing conflicts and nothing fails to import, but runs behave
+differently and fixtures written before the flag stop matching. The 2026-08-02 sync hit this
+with `--max-priority` (default `P0`), which filtered out the `P1` findings three fork-only
+tests depended on.
 
-The reason this matters is not tidiness. Most of upstream's 56 commits are fixes to the
-**secret-redaction path this fork already ships and runs** — `autoreview` strips credentials
-out of diffs before shipping them to a third-party review engine. Measured 2026-08-02:
+**Trap 4 -- new required external tools.** Upstream can make a binary mandatory. `#145` made
+TruffleHog a required preflight, and CI does not install it; upstream's own tests stub it via
+`add_fake_trufflehog`. Fork-only tests that predate the dependency need the same stub. Watch
+for new `resolve_command` / `SystemExit("... is required ...")` calls.
 
-| Signal | fork | upstream |
-| --- | --- | --- |
-| `trufflehog` references (heuristics → TruffleHog migration) | 0 | 31 |
-| `RecursionError` handlers (fail closed on deep structures) | 0 | 1 |
+**Trap 5 -- assertion string collisions.** New output lines can collide with loose assertions.
+`assertNotIn("clean", stdout)` began failing purely because the preflight now prints
+`trufflehog: clean (0.7s)`. Narrow the assertion; do not weaken it.
 
-Being behind here is a credential-leak patch backlog, not feature lag.
+Traps 1a, 1b, 2 and 3 are reported by `scripts/upstream-survey`. Traps 4 and 5 surface only
+when the gated suite runs, which is why step 2 comes before step 4.
+
+## `skills/autoreview/scripts/autoreview` — expect a competing rewrite
+
+14 of the 23 hunks were in this one file. This playbook previously said to resolve it as an
+ownership transfer -- take upstream wholesale, re-apply the fork layer. **Reading the hunks
+showed that was wrong**, and the same check is worth repeating before committing to any
+strategy: both sides had rewritten `main()` in different directions. Taking either side
+wholesale would have silently dropped either the receipt layer or the entire security backlog.
+
+What worked was writing the union by hand, region by region:
+
+- Upstream owns the bundle functions, secret-fragment threading, preflight, prompt chunking,
+  priority thresholds, and the new engines.
+- The fork's receipt layer, commit-SHA freezing, target binding and `_ActivityStreamDisplay`
+  are re-applied on top, inside the fork's outer `try/except` that writes error receipts.
+- Where the two genuinely competed, decide **on the merits and record why**. From 2026-08-02:
+  the fork's bounded `finish_parallel_tests(timeout=10)` was kept because upstream's plain
+  `finally` can hang on a failed review; Droid's `xhigh`/`max` thinking levels were kept
+  alongside upstream's new Kimi levels.
+
+Where the fork's divergence carries no real benefit, **yield to upstream to shrink the delta**.
+The fork's `list[str]` truncation reasons became upstream's `bool`:
+`ensure_reviewer_input_complete` already accepted both and the receipt contract never
+referenced them, so nothing degraded. `skills/autoreview/CLAUDE.md` is explicit that this file
+is canonical upstream and must not carry repo-local behaviour variants.
+
+Use the gated `test_receipt_contract` (32 tests) as the specification for the re-applied
+receipt layer, and the survey's trap-1a list as the re-application checklist.
 
 ## Invariants that must not move
 
@@ -159,10 +186,15 @@ inside the repository under review. They are byte-identical across merge-base, u
 fork — `sha256` prefix `5b3d5b7497fc217c`:
 
     for ref in "$(git merge-base upstream/main HEAD)" upstream/main HEAD; do
-      git show "$ref:skills/autoreview/scripts/autoreview" \
+      git show "${ref}:skills/autoreview/scripts/autoreview" \
         | awk '/^def (find_command|first_executable_candidate|is_within|has_directory_component)/,/^$/' \
         | shasum -a 256 | cut -c1-16
     done
+
+Note the braces. Written as `"$ref:skills/..."` this silently breaks under zsh, which reads
+`:s` as a parameter modifier: `git show` then gets an empty ref, awk sees nothing, and the
+command prints `e3b0c44298fc1c14` — the sha256 of empty input — for all three refs. Three
+matching hashes look like a pass. If you see `e3b0c44298fc1c14`, the check did not run.
 
 Any post-merge difference there is a defect, not a resolution.
 
@@ -188,4 +220,4 @@ add a justfile here.
 
 | Date | Upstream tip | Merge-base after | Drift before | Notes |
 | --- | --- | --- | --- | --- |
-| 2026-08-02 | `95e443f` | *(not synced)* | 66 behind / 48 ahead | Surveyed, gated, and documented. Merge **not** performed — needs owner authorization for one merge commit. Pins: merge-base `4664d27da471d1cb71bebdd9845dc8a6c56d6bbe`, fork tip `61df836`. |
+| 2026-08-02 | `95e443f` | `95e443f` | 66 behind / 48 ahead | **Synced.** Merge commit `42bc00d`; 8 conflicts / 23 hunks. The owner ran `git merge upstream/main` by hand — the hook denies it for agents. Tests 267 → 378. Closed the TruffleHog and `RecursionError` gap on the redaction path (`trufflehog` refs 0 → 31). Adopted upstream's `bool` truncation convention. Dropped `unified_diff_metadata` as a supersession, not a fork feature. All five trap classes fired; each is documented above because each cost time. |
