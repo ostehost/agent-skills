@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+"""Invariants that a wholesale upstream merge of scripts/autoreview would break SILENTLY.
+
+This fork is far behind upstream on skills/autoreview/scripts/autoreview (56 upstream
+commits since merge-base 4664d27). The dangerous conflicts are not the ones git marks --
+those get looked at. These are the two classes that do NOT produce a conflict marker:
+
+  1. TYPE DRIFT. The five truncation producers return tuple[str, list[str]] here and
+     tuple[str, bool] upstream; main() composes them with [*a, *b, *c] here and
+     `a or b or c` upstream. Some of the five conflict and some auto-merge, so a
+     resolution can end up mixing the two conventions. `[*True]` is a runtime TypeError
+     that no existing test catches.
+
+  2. DELETION BY REPLACEMENT. Six functions exist only in this fork. Taking upstream's
+     file wholesale removes them with no conflict marker and no failing test, because
+     nothing outside the (previously ungated) receipt suite referenced them.
+
+Delete this file once the sync has landed and the fork tracks upstream again.
+"""
+from __future__ import annotations
+
+import inspect
+import runpy
+import typing
+import unittest
+from pathlib import Path
+
+
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "autoreview"
+
+
+def load_helper() -> dict[str, object]:
+    return runpy.run_path(str(SCRIPT), run_name="autoreview_under_test")
+
+
+def truncation_annotation(func: object) -> object:
+    """Return the second element of func's `tuple[str, X]` return annotation.
+
+    The script uses `from __future__ import annotations`, so annotations arrive as
+    strings and typing.get_args() would see nothing; eval_str resolves them against
+    the function's own globals.
+    """
+    annotation = inspect.signature(func, eval_str=True).return_annotation
+    args = typing.get_args(annotation)
+    if len(args) != 2:
+        raise AssertionError(f"expected a 2-tuple return annotation, got {annotation!r}")
+    return args[1]
+
+
+# The order main() splats them in; see `input_truncated = [*bundle_truncated, ...]`.
+TRUNCATION_PRODUCERS = (
+    "local_bundle",
+    "branch_bundle",
+    "commit_bundle",
+    "load_extra_prompt",
+    "load_datasets",
+)
+
+# Present here, absent upstream. A wholesale file replacement drops all six.
+FORK_ONLY_FUNCTIONS = (
+    "resolve_commit_sha",
+    "review_target_binding",
+    "enforce_review_expectations",
+    "canonical_json",
+    "_jcs_serialize",
+    "sha256_hex",
+)
+
+
+class TruncationTypeCoherence(unittest.TestCase):
+    """All five producers must agree, and must agree with how main() combines them."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.helper = load_helper()
+
+    def test_every_producer_returns_a_list_of_reasons(self) -> None:
+        for name in TRUNCATION_PRODUCERS:
+            with self.subTest(producer=name):
+                truncation = truncation_annotation(self.helper[name])
+                self.assertIs(
+                    typing.get_origin(truncation),
+                    list,
+                    f"{name} returns {truncation!r} as its truncation value. This fork "
+                    f"accumulates truncation REASONS (list[str]); upstream returns a "
+                    f"bool. main() splats these, so a bool here is a runtime TypeError.",
+                )
+
+    def test_producers_do_not_mix_conventions(self) -> None:
+        seen = {
+            name: repr(truncation_annotation(self.helper[name]))
+            for name in TRUNCATION_PRODUCERS
+        }
+        self.assertEqual(
+            len(set(seen.values())),
+            1,
+            f"truncation producers disagree on their return type: {seen}. A merge "
+            f"resolution mixed this fork's list[str] with upstream's bool.",
+        )
+
+    def test_load_datasets_returns_an_empty_list_when_nothing_is_requested(self) -> None:
+        # Behavioural backstop for the annotation checks above: an annotation can be
+        # edited without the body following it.
+        import argparse
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            args = argparse.Namespace(dataset=[], datasets=None)
+            text, truncated = self.helper["load_datasets"](args, Path(tmp))
+        self.assertEqual(text, "")
+        self.assertIsInstance(
+            truncated, list, "load_datasets must report truncation as a list of reasons"
+        )
+        self.assertEqual(truncated, [])
+
+    def test_main_composes_truncation_reasons_by_splatting(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn(
+            "input_truncated = [*bundle_truncated, *prompt_truncated, *datasets_truncated]",
+            source,
+            "main() no longer splats the truncation lists. If this became "
+            "`bundle_truncated or prompt_truncated or ...`, upstream's bool "
+            "convention was taken and the reason strings are now silently dropped.",
+        )
+
+
+class ForkOnlyFunctionsSurvive(unittest.TestCase):
+    """These have no upstream counterpart; a 'take upstream' resolution deletes them."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.helper = load_helper()
+
+    def test_all_fork_only_functions_are_present(self) -> None:
+        missing = [name for name in FORK_ONLY_FUNCTIONS if not callable(self.helper.get(name))]
+        self.assertEqual(
+            missing,
+            [],
+            f"fork-only function(s) {missing} vanished. These do not exist upstream, so "
+            f"a wholesale file replacement removes them without a conflict marker.",
+        )
+
+
+class CanonicalDigestContract(unittest.TestCase):
+    """RFC 8785 (JCS) rules the receipt digest depends on for cross-language verification."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.helper = load_helper()
+
+    @property
+    def jcs(self):
+        # NOT a class attribute: assigning a bare function to one makes it an implicit
+        # method, so self.jcs(value) would call _jcs_serialize(self, value).
+        return self.helper["_jcs_serialize"]
+
+    def test_object_keys_sort_by_utf16be_not_by_code_point(self) -> None:
+        # The discriminator: U+1F600 encodes as the surrogate pair D83D DE00, which is
+        # BELOW U+FFFD in UTF-16BE but ABOVE it by code point. Plain sorted() gets this
+        # backwards, and the resulting digest stops matching other implementations.
+        self.assertEqual(self.jcs({"\U0001F600": 1, "�": 2}), '{"\U0001F600":1,"�":2}')
+        self.assertEqual(self.jcs({"é": 1, "ﬀ": 2, "a": 3}), '{"a":3,"é":1,"ﬀ":2}')
+
+    def test_primitives_and_nesting(self) -> None:
+        self.assertEqual(self.jcs(None), "null")
+        self.assertEqual(self.jcs(True), "true")
+        self.assertEqual(self.jcs(False), "false")
+        self.assertEqual(self.jcs({"b": [1, True, None], "a": "x"}), '{"a":"x","b":[1,true,null]}')
+
+    def test_floats_are_refused(self) -> None:
+        # Floats have no portable JSON representation; the digest must stay integer-only.
+        with self.assertRaises(SystemExit):
+            self.jcs(1.5)
+
+    def test_integers_beyond_2_53_are_refused(self) -> None:
+        limit = self.helper["JCS_MAX_SAFE_INTEGER"]
+        self.assertEqual(limit, 2**53 - 1)
+        self.assertEqual(self.jcs(limit), str(limit))
+        with self.assertRaises(SystemExit):
+            self.jcs(limit + 1)
+
+    def test_non_string_object_keys_are_refused(self) -> None:
+        with self.assertRaises(SystemExit):
+            self.jcs({1: "x"})
+
+    def test_sha256_hex_treats_str_and_utf8_bytes_alike(self) -> None:
+        sha256_hex = self.helper["sha256_hex"]
+        self.assertEqual(sha256_hex("abc"), sha256_hex(b"abc"))
+        self.assertEqual(
+            sha256_hex("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

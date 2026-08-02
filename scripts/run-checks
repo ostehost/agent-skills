@@ -63,7 +63,9 @@ step "check python scripts" \
     scripts/validate-skills scripts/validate-skills.test.py \
     skills/autoreview/scripts/autoreview \
     skills/autoreview/scripts/test-review-harness.py \
-    skills/autoreview/scripts/autoreview_test.py
+    skills/autoreview/scripts/autoreview_test.py \
+    skills/autoreview/tests/test_receipt_contract.py \
+    skills/autoreview/tests/test_merge_invariants.py
 
 step "repository script tests: install-skills" "$PY" scripts/install-skills.test.py
 step "repository script tests: validate-skills" "$PY_YAML" scripts/validate-skills.test.py
@@ -73,9 +75,13 @@ for t in config-defaults fallback-scope engine-isolation json-array-parser \
   step "autoreview self-test: $t" "$PY" skills/autoreview/scripts/autoreview "--self-test-$t"
 done
 
+# Keep this module list byte-identical to the "Run Python tests" step in
+# .github/workflows/validate.yml -- the two gates must not drift.
 step "python tests" \
   "$PY" -m unittest skills/autoreview/scripts/autoreview_test.py \
-    skills.autoreview.tests.test_autoreview_hardening
+    skills.autoreview.tests.test_autoreview_hardening \
+    skills.autoreview.tests.test_receipt_contract \
+    skills.autoreview.tests.test_merge_invariants
 
 step "check node scripts" \
   "$NODE" --check skills/agent-transcript/scripts/agent-transcript
