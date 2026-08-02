@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# Run the same checks .github/workflows/validate.yml runs, locally and in one command.
+# Mirrors that workflow step-for-step so a green run here means a green run in CI.
+# Directly runnable, no build step (AGENTS.md "Architecture").
+#
+# INTERPRETER: uses `python3`/`node` from PATH. Do NOT point this at the in-repo
+# .venv — skills/autoreview/scripts/autoreview:2076 (find_command) deliberately
+# refuses any executable inside the repo under review, so --self-test-opencode-isolation
+# fails when invoked by an in-repo interpreter. That refusal is the feature; install
+# requirements-dev.txt into an interpreter that lives outside this tree instead.
+set -uo pipefail
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+PY="${PYTHON:-python3}"
+NODE="${NODE:-node}"
+failed=()
+
+step() { # step <name> <cmd...>
+  local name="$1"; shift
+  if "$@" >/tmp/run-checks.$$ 2>&1; then
+    printf '  ok    %s\n' "$name"
+  else
+    printf '  FAIL  %s\n' "$name"
+    sed 's/^/          /' /tmp/run-checks.$$ | tail -25
+    failed+=("$name")
+  fi
+  rm -f /tmp/run-checks.$$
+}
+
+command -v "$PY"   >/dev/null || { echo "run-checks: $PY not on PATH" >&2; exit 2; }
+command -v "$NODE" >/dev/null || { echo "run-checks: $NODE not on PATH" >&2; exit 2; }
+
+# Only validate-skills and its test import PyYAML; every other step runs on a bare
+# interpreter. CI installs requirements-dev.txt into its setup-python, so one interpreter
+# covers everything there. Locally the repo's own .venv/ (gitignored) usually carries
+# PyYAML, and it is safe for these two steps precisely because they are plain repo tooling
+# — unlike the autoreview self-tests above, nothing here enforces an out-of-repo binary.
+PY_YAML="$PY"
+if ! "$PY" -c 'import yaml' 2>/dev/null; then
+  if [ -x .venv/bin/python ] && .venv/bin/python -c 'import yaml' 2>/dev/null; then
+    PY_YAML="$PWD/.venv/bin/python"
+  else
+    echo "run-checks: PyYAML missing for $PY and no usable .venv." >&2
+    echo "            Run: $PY -m pip install -r requirements-dev.txt" >&2
+    exit 2
+  fi
+fi
+
+echo "run-checks ($("$PY" -V 2>&1), $("$NODE" --version))"
+[ "$PY_YAML" = "$PY" ] || echo "  note  PyYAML steps use $PY_YAML"
+
+step "validate skill frontmatter" \
+  "$PY_YAML" scripts/validate-skills
+
+step "check shell scripts" \
+  bash -n skills/autoreview/scripts/test-review-harness
+
+step "check python scripts" \
+  "$PY" -m py_compile \
+    scripts/install-skills scripts/install-skills.test.py \
+    scripts/validate-skills scripts/validate-skills.test.py \
+    skills/autoreview/scripts/autoreview \
+    skills/autoreview/scripts/test-review-harness.py \
+    skills/autoreview/scripts/autoreview_test.py
+
+step "repository script tests: install-skills" "$PY" scripts/install-skills.test.py
+step "repository script tests: validate-skills" "$PY_YAML" scripts/validate-skills.test.py
+
+for t in config-defaults fallback-scope engine-isolation json-array-parser \
+         opencode-jsonl-parser opencode-isolation cursor-jsonl-parser; do
+  step "autoreview self-test: $t" "$PY" skills/autoreview/scripts/autoreview "--self-test-$t"
+done
+
+step "python tests" \
+  "$PY" -m unittest skills/autoreview/scripts/autoreview_test.py \
+    skills.autoreview.tests.test_autoreview_hardening
+
+step "check node scripts" \
+  "$NODE" --check skills/agent-transcript/scripts/agent-transcript
+
+step "node tests" \
+  "$NODE" --test skills/agent-transcript/scripts/agent-transcript.test.mjs \
+    skills/session-viewer/scripts/session-viewer.test.ts
+
+# CI gates these to Linux (the matrix's other leg is Windows, which lacks jq/bash).
+# Any POSIX box with jq can run them, so gate on the dependency, not the OS.
+if command -v jq >/dev/null; then
+  step "design-competition conformance (C1-C8)" skills/design-competition/scripts/check-conformance.sh
+  step "design-competition script tests"        skills/design-competition/scripts/scripts.test.sh
+else
+  echo "  skip  design-competition suites (jq not on PATH)"
+fi
+
+if [ ${#failed[@]} -eq 0 ]; then
+  echo "ALL CHECKS PASSED"
+else
+  printf '\n%d CHECK(S) FAILED:\n' "${#failed[@]}" >&2
+  printf '  - %s\n' "${failed[@]}" >&2
+  exit 1
+fi
