@@ -200,6 +200,15 @@ class ReceiptContractTests(unittest.TestCase):
                 "USERPROFILE": str(tempdir),
             }
         )
+        # Upstream's heuristics-to-TruffleHog migration made the preflight scan a REQUIRED
+        # tool, and CI does not install the real binary. Stub it the same way the hardening
+        # suite does (add_fake_trufflehog) so these receipt tests exercise the receipt, not
+        # the availability of an external scanner.
+        self.helper["write_executable"](
+            tempdir / "trufflehog",
+            "#!/usr/bin/env python3\nraise SystemExit(0)\n",
+        )
+        env["PATH"] = f"{tempdir}{os.pathsep}{env.get('PATH', '')}"
         return {
             "repo": repo,
             "codex_bin": codex_bin,
@@ -221,6 +230,11 @@ class ReceiptContractTests(unittest.TestCase):
                 str(workspace["codex_bin"]),
                 "--receipt-output",
                 str(workspace["receipt"]),
+                # Upstream added --max-priority, defaulting to P0. These receipt fixtures
+                # emit P1 findings and predate any priority filter, so ask for the full
+                # range to preserve their original "report everything" semantics.
+                "--max-priority",
+                "P3",
                 *extra,
             ],
             cwd=workspace["repo"],
@@ -325,7 +339,14 @@ class ReceiptContractTests(unittest.TestCase):
             _, payload = self.load_receipt(workspace)
             self.assertEqual(payload["status"], "error")
             self.assertEqual(payload["error"]["kind"], "engine_failure")
-            self.assertNotIn("clean", result.stdout)
+            # Upstream's preflight prints "trufflehog: clean (0.7s)"; that is not a
+            # receipt status. Check the receipt-bearing output, not the scanner line.
+            without_preflight = "\n".join(
+                line
+                for line in result.stdout.splitlines()
+                if not line.startswith("trufflehog: ")
+            )
+            self.assertNotIn("clean", without_preflight)
 
     @unittest.skipIf(os.name == "nt", "the fake executables are POSIX-only")
     def test_invalid_structured_output_writes_error_receipt(self) -> None:
@@ -536,10 +557,12 @@ class ReceiptContractTests(unittest.TestCase):
             original_bundle = self.helper["commit_bundle"]
             recorded_refs: list[str] = []
 
-            def moving_commit_bundle(repo_path: Path, commit_ref: str):
+            # *args keeps this stub signature-compatible with upstream's commit_bundle,
+            # which now takes a known_secret_fragments_out accumulator.
+            def moving_commit_bundle(repo_path: Path, commit_ref: str, *args):
                 recorded_refs.append(commit_ref)
                 git(repo, "update-ref", "refs/heads/movable", moved_sha)
-                return original_bundle(repo_path, commit_ref)
+                return original_bundle(repo_path, commit_ref, *args)
 
             argv = [
                 "autoreview",
@@ -566,6 +589,9 @@ class ReceiptContractTests(unittest.TestCase):
                         "AUTOREVIEW_FAKE_RECORD": str(workspace["record"]),
                         "HOME": str(root),
                         "USERPROFILE": str(root),
+                        # main() runs in-process here, so workspace["env"] never applies;
+                        # the TruffleHog preflight stub must reach the real environment.
+                        "PATH": workspace["env"]["PATH"],
                     },
                 ), contextlib.redirect_stdout(io.StringIO()):
                     exit_code = self.helper["main"]()

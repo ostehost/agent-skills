@@ -86,9 +86,14 @@ step "python tests" \
 
 step "check node scripts" \
   "$NODE" --check skills/agent-transcript/scripts/agent-transcript
+step "check node scripts: beam" \
+  "$NODE" --check skills/beam/scripts/beam
+step "check node scripts: beam-session" \
+  "$NODE" --check skills/beam/scripts/beam-session.js
 
 step "node tests" \
   "$NODE" --test skills/agent-transcript/scripts/agent-transcript.test.mjs \
+    skills/beam/scripts/beam.test.mjs \
     skills/session-viewer/scripts/session-viewer.test.ts
 
 # CI gates these to Linux (the matrix's other leg is Windows, which lacks jq/bash).

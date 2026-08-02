@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import importlib.util
 import json
 import os
@@ -102,6 +103,147 @@ class AutoreviewCursorTests(unittest.TestCase):
         self.assertIn("review engine result was not structured JSON", str(exc_info.exception))
 
 
+class AutoreviewPriorityTests(unittest.TestCase):
+    def test_default_priority_is_p0(self) -> None:
+        with mock.patch.object(sys, "argv", ["autoreview"]):
+            args = AUTOREVIEW.parse_args()
+        self.assertEqual(args.max_priority, "P0")
+
+    def test_priority_filter_omits_lower_findings_and_cleans_verdict(self) -> None:
+        report = copy.deepcopy(DRAFT_REPORT)
+        AUTOREVIEW.filter_findings_by_priority(report, "P0")
+        self.assertEqual(report["findings"], [])
+        self.assertEqual(report["overall_correctness"], "patch is correct")
+        self.assertIn("below the requested P0", report["overall_explanation"])
+
+
+class AutoreviewSecretScannerTests(unittest.TestCase):
+    def test_typescript_type_annotations_are_not_credential_material(self) -> None:
+        source = "\n".join(
+            (
+                "export function modelRuntime(",
+                "  env: NodeJS.ProcessEnv = process.env,",
+                "): ModelRuntime {",
+                "  return env.MODEL_RUNTIME;",
+                "}",
+                "",
+                "export function modelRuntimeCredentials(",
+                "  env: NodeJS.ProcessEnv,",
+                "): NodeJS.ProcessEnv {",
+                "  const credentials: NodeJS.ProcessEnv = {};",
+                "  return credentials;",
+                "}",
+            )
+        )
+
+        self.assertFalse(
+            AUTOREVIEW.secret_text_risk(
+                source,
+                javascript_dialect="typescript",
+            )
+        )
+        self.assertEqual(
+            AUTOREVIEW.review_secret_fragments(
+                source,
+                javascript_dialect="typescript",
+            ),
+            set(),
+        )
+
+    def test_typescript_typed_declaration_still_scans_initializer(self) -> None:
+        literal_value = "actual-production-" + "secret"
+        source = (
+            "const credentials: NodeJS.ProcessEnv = "
+            f'"{literal_value}";'
+        )
+
+        self.assertTrue(
+            AUTOREVIEW.secret_text_risk(
+                source,
+                javascript_dialect="typescript",
+            )
+        )
+        self.assertEqual(
+            AUTOREVIEW.review_secret_fragments(
+                source,
+                javascript_dialect="typescript",
+            ),
+            {literal_value},
+        )
+
+    def test_boolean_declarations_are_not_credential_material(self) -> None:
+        secret_field = "is" + "Secret"
+        client_secret_field = "hasClient" + "Secret"
+        cases = (
+            (f"val {secret_field}: Boolean? = null,", None),
+            (f"var {client_secret_field}: Boolean = false", None),
+            (f"abstract val {secret_field}: Boolean?", None),
+            (f"val {secret_field}: Boolean?", None),
+            (f"const {client_secret_field}: boolean = true;", "typescript"),
+            (f"declare const {client_secret_field}: boolean;", "typescript"),
+            (f"let {secret_field}: Bool? = nil", None),
+            (f"let {secret_field}: Bool?", None),
+        )
+
+        for content, javascript_dialect in cases:
+            with self.subTest(content=content):
+                self.assertFalse(
+                    AUTOREVIEW.secret_text_risk(
+                        content,
+                        javascript_dialect=javascript_dialect,
+                    )
+                )
+
+    def test_boolean_and_null_literal_values_are_not_credentials(self) -> None:
+        cases = (
+            ("is" + "Secret", "true"),
+            ("requires" + "Password", "false"),
+            ("access" + "Token", "null"),
+        )
+        for field_name, literal in cases:
+            content = f"{field_name} = {literal}"
+            with self.subTest(content=content):
+                self.assertFalse(AUTOREVIEW.secret_text_risk(content))
+
+    def test_boolean_annotation_does_not_hide_real_credential_literal(self) -> None:
+        literal_value = "actual-production-" + "secret"
+        secret_field = "is" + "Secret"
+        client_secret_field = "hasClient" + "Secret"
+        cases = (
+            (f'val {secret_field}: Boolean? = "{literal_value}",', None),
+            (f'var {client_secret_field}: Boolean = "{literal_value}"', None),
+            (
+                f'const {client_secret_field}: boolean = "{literal_value}";',
+                "typescript",
+            ),
+            (f'let {secret_field}: Bool? = "{literal_value}"', None),
+        )
+
+        for content, javascript_dialect in cases:
+            with self.subTest(content=content):
+                self.assertTrue(
+                    AUTOREVIEW.secret_text_risk(
+                        content,
+                        javascript_dialect=javascript_dialect,
+                    )
+                )
+
+    def test_boolean_prefix_values_remain_credentials(self) -> None:
+        field_name = "client" + "Secret"
+        for prefix in ("Boolean", "boolean", "Bool"):
+            literal_value = prefix + "-prod-credential"
+            content = f"{field_name}: {literal_value}"
+            with self.subTest(content=content):
+                self.assertTrue(AUTOREVIEW.secret_text_risk(content))
+
+    def test_boolean_type_tokens_in_config_remain_credentials(self) -> None:
+        field_name = "client" + "Secret"
+        for literal_value in ("Boolean?", "Boolean?=abc1234"):
+            content = f"{field_name}: {literal_value}"
+            with self.subTest(content=content):
+                self.assertTrue(AUTOREVIEW.secret_text_risk(content))
+
+
 class AutoreviewCompatibilityTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -162,6 +304,153 @@ class AutoreviewCompatibilityTests(unittest.TestCase):
             AUTOREVIEW.parse_keyed_options(["cursor-agent=auto"], "model"),
             (None, {"cursor": "auto"}),
         )
+
+    def test_kimi_bin_cli_option(self) -> None:
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["autoreview", "--kimi-bin", "/tmp/trusted-kimi"],
+        ):
+            args = AUTOREVIEW.parse_args()
+        self.assertEqual(args.kimi_bin, "/tmp/trusted-kimi")
+
+    def test_kimi_reviewer_always_disables_tools(self) -> None:
+        args = AUTOREVIEW.reviewer_test_args(
+            engine="kimi",
+            thinking=["on"],
+        )
+
+        reviewer = AUTOREVIEW.reviewer_args(args)[0]
+
+        self.assertEqual(reviewer.engine, "kimi")
+        self.assertEqual(reviewer.thinking, "on")
+        self.assertFalse(reviewer.tools)
+
+    def test_all_reviewers_includes_kimi(self) -> None:
+        args = AUTOREVIEW.reviewer_test_args(reviewers="all")
+
+        reviewers = AUTOREVIEW.reviewer_args(args)
+
+        self.assertEqual(
+            [reviewer.engine for reviewer in reviewers],
+            ["codex", "claude", "pi", "kimi"],
+        )
+
+    def test_kimi_isolation_requires_current_cli_contract(self) -> None:
+        args = argparse.Namespace(kimi_bin="kimi")
+        required_flags = " ".join(
+            [
+                "--agent-file",
+                "--skills-dir",
+                "--prompt",
+                "--output-format",
+                "--model",
+            ]
+        )
+
+        def fake_run(command: list[str], *_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            if "--version" in command:
+                return subprocess.CompletedProcess(command, 0, "0.31.1", "")
+            return subprocess.CompletedProcess(command, 0, required_flags, "")
+
+        with tempfile.TemporaryDirectory(prefix="autoreview-kimi-probe-test.") as tmpdir, mock.patch.object(
+            AUTOREVIEW,
+            "resolve_command",
+            return_value="/usr/bin/kimi",
+        ), mock.patch.object(
+            AUTOREVIEW,
+            "safe_engine_env",
+            return_value={},
+        ), mock.patch.object(
+            AUTOREVIEW,
+            "safe_temp_root",
+            return_value=Path(tmpdir),
+        ), mock.patch.object(
+            AUTOREVIEW,
+            "run",
+            side_effect=fake_run,
+        ):
+            self.assertEqual(
+                AUTOREVIEW.ensure_kimi_isolation_supported(args, Path(tmpdir)),
+                "/usr/bin/kimi",
+            )
+
+    def test_kimi_runs_with_empty_tools_skills_and_mcp(self) -> None:
+        args = argparse.Namespace(
+            kimi_bin="kimi",
+            model="kimi-model",
+            stream_engine_output=False,
+            thinking="on",
+        )
+        observed: dict[str, object] = {}
+
+        def fake_run(
+            command: list[str],
+            cwd: Path,
+            **kwargs: object,
+        ) -> subprocess.CompletedProcess[str]:
+            observed["command"] = command
+            observed["cwd"] = cwd
+            observed["env"] = kwargs["env"]
+            env = kwargs["env"]
+            assert isinstance(env, dict)
+            home = Path(str(env["KIMI_CODE_HOME"]))
+            observed["agent"] = (home / "reviewer.md").read_text(encoding="utf-8")
+            observed["config"] = (home / "config.toml").read_text(encoding="utf-8")
+            observed["skills"] = list((home / "skills").iterdir())
+            observed["workspace"] = list(cwd.iterdir())
+            stream = (
+                json.dumps({"role": "meta", "type": "system.version", "version": "0.31.1"})
+                + "\n"
+                + json.dumps({"role": "assistant", "content": json.dumps(FINAL_REPORT)})
+                + "\n"
+            )
+            return subprocess.CompletedProcess(command, 0, stream, "")
+
+        with tempfile.TemporaryDirectory(prefix="autoreview-kimi-run-test.") as tmpdir:
+            repo = Path(tmpdir) / "repo"
+            repo.mkdir()
+            with mock.patch.object(
+                AUTOREVIEW,
+                "ensure_kimi_isolation_supported",
+                return_value="/usr/bin/kimi",
+            ), mock.patch.object(
+                AUTOREVIEW,
+                "load_kimi_review_config",
+                return_value=({"telemetry": False}, None),
+            ), mock.patch.object(
+                AUTOREVIEW,
+                "run_with_heartbeat",
+                side_effect=fake_run,
+            ):
+                output = AUTOREVIEW.run_kimi(args, repo, "review prompt")
+
+        self.assertEqual(json.loads(output), FINAL_REPORT)
+        command = observed["command"]
+        self.assertIsInstance(command, list)
+        assert isinstance(command, list)
+        self.assertEqual(command[command.index("--prompt") + 1], "review prompt")
+        self.assertEqual(command[command.index("--output-format") + 1], "stream-json")
+        self.assertEqual(command[command.index("--model") + 1], "kimi-model")
+        self.assertNotIn("--thinking", command)
+        agent = observed["agent"]
+        self.assertIsInstance(agent, str)
+        assert isinstance(agent, str)
+        self.assertIn("tools: []", agent)
+        self.assertIn("subagents: []", agent)
+        config = observed["config"]
+        self.assertIsInstance(config, str)
+        assert isinstance(config, str)
+        self.assertIn("[thinking]", config)
+        self.assertIn("enabled = true", config)
+        self.assertEqual(observed["skills"], [])
+        self.assertEqual(observed["workspace"], [])
+        env = observed["env"]
+        self.assertIsInstance(env, dict)
+        assert isinstance(env, dict)
+        self.assertEqual(env["KIMI_DISABLE_TELEMETRY"], "1")
+        self.assertEqual(env["KIMI_CODE_NO_AUTO_UPDATE"], "1")
+        self.assertNotEqual(Path(str(env["KIMI_CODE_HOME"])), repo)
 
     def test_codex_config_status_exposes_keys_only(self) -> None:
         args = argparse.Namespace(codex_config=['model_verbosity="low"'])
@@ -606,8 +895,13 @@ class AutoreviewCompatibilityTests(unittest.TestCase):
             source.write_text("after\n")
 
             cursor_bin = root / "cursor-agent"
+            trufflehog_bin = root / "trufflehog"
             record_path = root / "record.json"
             AUTOREVIEW.write_executable(cursor_bin, AUTOREVIEW.fake_cursor_script())
+            AUTOREVIEW.write_executable(
+                trufflehog_bin,
+                "#!/usr/bin/env python3\nraise SystemExit(0)\n",
+            )
             env = os.environ.copy()
             env.update(
                 {
@@ -616,7 +910,10 @@ class AutoreviewCompatibilityTests(unittest.TestCase):
                     "GIT_CONFIG_GLOBAL": str(root / "hostile-gitconfig"),
                     "NODE_OPTIONS": "--require=hostile.js",
                     "PYTHONPATH": str(root / "hostile-python"),
-                    "PATH": f"{repo}{os.pathsep}{env.get('PATH', '')}",
+                    "PATH": (
+                        f"{root}{os.pathsep}{repo}{os.pathsep}"
+                        f"{env.get('PATH', '')}"
+                    ),
                     "HOME": str(root),
                     "USERPROFILE": str(root),
                 }
