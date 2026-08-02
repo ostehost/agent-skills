@@ -9,7 +9,9 @@
 # fails when invoked by an in-repo interpreter. That refusal is the feature; install
 # requirements-dev.txt into an interpreter that lives outside this tree instead.
 set -uo pipefail
-cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Fail loudly rather than checking whatever directory we happen to be in.
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" \
+  || { echo "run-checks: cannot cd to the repository root" >&2; exit 2; }
 
 PY="${PYTHON:-python3}"
 NODE="${NODE:-node}"
