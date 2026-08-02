@@ -66,4 +66,14 @@ while IFS= read -r c; do
   jq -e --arg c "$c" '.gate.per_criterion[$c] | type == "boolean"' "$DOC" >/dev/null || fail "gate.per_criterion.$c must be boolean"
 done <<< "$CRITERIA"
 
+# 9. ai_slop_flags ids must be known to rubric.json (single-sourced there, like the lists above).
+#    recompute-gate.sh looks each id up in rubric.json's slop_flags to sum the penalty and an
+#    unknown id contributes 0 — so a typo'd or invented flag would SILENTLY erase its own penalty
+#    and inflate weighted_total. The schema types this array as plain strings, so this is the only
+#    place the ids are checked. Fail closed instead.
+jq -e --slurpfile r "$DIR/rubric.json" '
+  ($r[0].slop_flags | map(.id)) as $known
+  | [.ai_slop_flags[]? as $f | select(($known | index($f)) == null)] | length == 0
+' "$DOC" >/dev/null || fail "ai_slop_flags contains an id absent from rubric.json slop_flags"
+
 echo "ok: $DOC"

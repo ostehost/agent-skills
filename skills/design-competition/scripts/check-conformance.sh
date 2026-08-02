@@ -78,14 +78,27 @@ pass "C2 auto-emitted and human-emitted critique-<k>.json are byte-identical (NO
 
 # ---- C2b adversarial seat-channel regression (review probes adv1/adv2/adv2b) -
 # Honest about which validator catches what. Free-text watermarks (adv1) are NOT policeable by either.
-adv2b=$(printf '%s' "$GATED" | jq '.gate.per_criterion.seat = 7')         # literal forbidden key
-if "$S/validate-critique.sh" <(printf '%s' "$adv2b") "$SCHEMA" >/dev/null 2>&1; then
-  die "C2b jq validator ACCEPTED a forbidden 'seat' key inside per_criterion"
-fi
+#
+# Every probe below MUST reach the validator as a REAL FILE. validate-critique.sh reopens its
+# argument once per rule, so a <(...) FIFO is drained by the first read and every later rule
+# then fails on empty input — the probe "passes" no matter what the validator checks, which is
+# the same tautology C3b was originally written to kill. reject() proves each probe is rejected
+# for its OWN reason by first asserting the unmutated fixture is ACCEPTED from a real file.
+"$S/validate-critique.sh" "$TMP/critique-auto.json" "$SCHEMA" >/dev/null 2>&1 \
+  || die "C2b/C3b probe harness broken: the clean fixture is rejected, so every probe below is vacuous"
+reject(){ # reject <desc> <jq-mutation>
+  printf '%s' "$GATED" | jq "$2" > "$TMP/probe.json"
+  if "$S/validate-critique.sh" "$TMP/probe.json" "$SCHEMA" >/dev/null 2>&1; then
+    die "$1"
+  fi
+}
+reject "C2b jq validator ACCEPTED a forbidden 'seat' key inside per_criterion" \
+  '.gate.per_criterion.seat = 7'
+reject "C2b jq validator ACCEPTED a novel key in per_criterion" \
+  '.gate.per_criterion.x_seatchan = 7'
+reject "C2b jq validator ACCEPTED a forbidden seat key nested under scores" \
+  '.scores.design_quality.seat = "human"'
 adv2=$(printf '%s' "$GATED" | jq '.gate.per_criterion.x_seatchan = 7')   # novel (non-listed) key
-if "$S/validate-critique.sh" <(printf '%s' "$adv2") "$SCHEMA" >/dev/null 2>&1; then
-  die "C2b jq validator ACCEPTED a novel key in per_criterion"
-fi
 
 if command -v ajv >/dev/null 2>&1; then
   printf '%s' "$adv2" > "$TMP/adv2.json"
@@ -108,15 +121,15 @@ else
 fi
 
 # ---- C3b enum enforcement in the jq fallback (regression: severity check was a tautology)
-badsev=$(printf '%s' "$GATED" | jq '.change_requests[0].severity="bananas"')
-if "$S/validate-critique.sh" <(printf '%s' "$badsev") "$SCHEMA" >/dev/null 2>&1; then
-  die "C3b jq validator ACCEPTED an out-of-enum change_request severity"
-fi
-badverdict=$(printf '%s' "$GATED" | jq '.verdict="MAYBE"')
-if "$S/validate-critique.sh" <(printf '%s' "$badverdict") "$SCHEMA" >/dev/null 2>&1; then
-  die "C3b jq validator ACCEPTED an out-of-enum verdict"
-fi
-pass "C3b jq validator rejects out-of-enum severity and verdict"
+reject "C3b jq validator ACCEPTED an out-of-enum change_request severity" \
+  '.change_requests[0].severity="bananas"'
+reject "C3b jq validator ACCEPTED an out-of-enum verdict" \
+  '.verdict="MAYBE"'
+# An ai_slop_flags id the rubric does not define resolves to penalty 0 in recompute-gate, so a
+# typo would silently erase its own penalty and inflate weighted_total. Fail closed instead.
+reject "C3b jq validator ACCEPTED an ai_slop_flags id absent from rubric.json" \
+  '.ai_slop_flags=["cluster_cream_serifs"]'
+pass "C3b jq validator rejects out-of-enum severity/verdict and unknown slop-flag ids"
 
 # ---- C4 single baton read path ----------------------------------------------
 grep -q 'NEXT_FINDINGS.json (the baton' "$S/run-harness.sh" || die "C4 generator does not read NEXT_FINDINGS.json as baton"

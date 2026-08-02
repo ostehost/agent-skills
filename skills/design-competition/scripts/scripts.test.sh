@@ -120,6 +120,80 @@ check_success "recompute-gate downgrades evaluator floor booleans contradicted b
   jq -e '.quality_floor.contrast_AA_4_5==false and .quality_floor.responsive_1440==true
          and .gate.floor_breaches==["contrast_AA_4_5"] and .axe_core_version=="4.12.1"' <<<"$with_axe"
 
+> "$TMP/clean-floor.json" jq '.quality_floor={responsive_1440:true, responsive_768:true, responsive_375:true, visible_keyboard_focus:true, contrast_AA_4_5:true}
+  | .change_requests=[] | .scores.originality.score=5' "$tampered"
+
+# penalty_cap: three 0.4 flags sum to 1.2, which must clamp to rubric penalty_cap 1.0.
+# Untested before, so the clamp branch could have regressed to an uncapped subtraction.
+capped="$(jq '.ai_slop_flags=["cluster_cream_serif","cluster_dark_acid","cluster_broadsheet"]' "$TMP/clean-floor.json" \
+  | "$DIR/recompute-gate.sh" /dev/stdin "$DIR/../rubric.json")"
+check_success "recompute-gate clamps the summed slop penalty at rubric penalty_cap" \
+  jq -e '.weighted_total==(0.35*4+0.35*5+0.20*4+0.10*5-1.0)' <<<"$capped"
+
+# Weights x half-step scores produce binary-float noise; the *1000|round/1000 step must
+# yield a clean decimal so scores.csv and the gate stay reproducible across jq builds.
+rounded="$(jq '.scores.design_quality.score=3.5 | .scores.originality.score=2.5
+    | .scores.craft.score=4.5 | .scores.functionality.score=1.5 | .ai_slop_flags=["motion_scatter"]' "$TMP/clean-floor.json" \
+  | "$DIR/recompute-gate.sh" /dev/stdin "$DIR/../rubric.json")"
+check_success "recompute-gate rounds the weighted total to 3 decimals (no float noise)" \
+  jq -e '.weighted_total==2.95' <<<"$rounded"
+
+# ---- validate-critique.sh ----------------------------------------------------
+# check-conformance covers the happy path and the severity/verdict enums (C3/C3b); these
+# cover the remaining load-bearing rules, which no test exercised.
+
+valid_doc="$TMP/valid.json"
+jq '.verdict="NEEDS_WORK"' "$tampered" > "$valid_doc"
+
+# validate-critique.sh reopens $DOC for every rule, so each variant MUST be a real file:
+# a <(...) FIFO is drained by the first read and every later rule then fails on empty input,
+# which would turn every check_failure below into a false pass.
+mutate() { jq "$1" "$valid_doc" > "$TMP/mut.json"; printf '%s' "$TMP/mut.json"; }
+
+check_success "validate-critique accepts a well-formed critique with a known slop flag" \
+  "$DIR/validate-critique.sh" "$valid_doc"
+
+# An unknown id is looked up in rubric.json by recompute-gate, misses, and contributes a
+# penalty of 0 — a typo would silently erase its own penalty and inflate weighted_total.
+check_failure "validate-critique rejects an ai_slop_flags id absent from rubric.json" \
+  "$DIR/validate-critique.sh" "$(mutate '.ai_slop_flags=["cluster_cream_serifs"]')"
+check_failure "validate-critique rejects an off-grid score" \
+  "$DIR/validate-critique.sh" "$(mutate '.scores.craft.score=3.7')"
+check_failure "validate-critique rejects a score outside 1..5" \
+  "$DIR/validate-critique.sh" "$(mutate '.scores.craft.score=5.5')"
+check_failure "validate-critique rejects a null score unless the verdict is UNRENDERABLE" \
+  "$DIR/validate-critique.sh" "$(mutate '.scores.craft.score=null')"
+check_success "validate-critique accepts a null score when the verdict IS UNRENDERABLE" \
+  "$DIR/validate-critique.sh" "$(mutate '.scores.craft.score=null | .verdict="UNRENDERABLE"')"
+check_failure "validate-critique rejects viewports other than 1440/768/375" \
+  "$DIR/validate-critique.sh" "$(mutate '.viewports=[1440,768,320]')"
+check_failure "validate-critique rejects a gate.per_criterion missing a criterion" \
+  "$DIR/validate-critique.sh" "$(mutate 'del(.gate.per_criterion.craft)')"
+check_failure "validate-critique rejects a nested seat-correlated key" \
+  "$DIR/validate-critique.sh" "$(mutate '.scores.craft.seat="human"')"
+
+# ---- human-seat-to-json.sh ---------------------------------------------------
+# Regression: the stripper deleted TOP-LEVEL forbidden keys only, while validate-critique
+# greps EVERY path. A nested seat key survived the strip, tripped the validator, and
+# run-harness swapped the whole critique for an UNRENDERABLE seed — silently discarding a
+# real human review. Stripper and validator must stay symmetric.
+sheet="$TMP/REVIEW-SHEET.nested.md"
+{
+  printf '# REVIEW-SHEET (filled by human)\n\n```json\n'
+  jq '.seat="human" | .scores.design_quality.seat="human" | .gate.per_criterion.Confidence=0.9' "$valid_doc"
+  printf '\n```\n'
+} > "$sheet"
+stripped="$TMP/stripped.json"
+check_success "human-seat-to-json extracts and strips a sheet carrying nested seat keys" \
+  bash -c '"$1" "$2" > "$3"' _ "$DIR/human-seat-to-json.sh" "$sheet" "$stripped"
+check_success "human-seat-to-json strips seat keys at every depth, case-insensitively" \
+  jq -e '(.seat|not) and (.scores.design_quality|has("seat")|not)
+         and (.gate.per_criterion|has("Confidence")|not)' "$stripped"
+check_success "human-seat-to-json output passes validate-critique (stripper/validator symmetry)" \
+  "$DIR/validate-critique.sh" "$stripped"
+check_success "human-seat-to-json preserves the gated content verbatim" \
+  bash -c 'diff <(jq -S . "$1") <(jq -S . "$2")' _ "$valid_doc" "$stripped"
+
 # ---- render-baton-md.sh -------------------------------------------------------
 
 baton="$TMP/NEXT_FINDINGS.json"
