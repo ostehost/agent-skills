@@ -60,6 +60,7 @@ step "check shell scripts" \
 step "check python scripts" \
   "$PY" -m py_compile \
     scripts/install-skills scripts/install-skills.test.py \
+    scripts/upstream-survey \
     scripts/validate-skills scripts/validate-skills.test.py \
     skills/autoreview/scripts/autoreview \
     skills/autoreview/scripts/test-review-harness.py \

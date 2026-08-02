@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""Read-only pre-merge survey of this fork against its upstream.
+
+Answers the question git will NOT answer for you: what breaks *without* producing a
+conflict marker? Marked conflicts get read by whoever resolves them. The damage that
+actually lands unnoticed is:
+
+  1. DELETION BY REPLACEMENT - a symbol exists only in the fork, so resolving a file
+     as "take upstream" removes it silently. No conflict marker, no failing test if
+     nothing referenced it.
+  2. SIGNATURE DRIFT - a function exists on both sides with a different signature or
+     return type. If some call sites conflict and others auto-merge, a resolution can
+     mix the two conventions and produce a runtime TypeError git never warned about.
+
+Both are found by diffing the two sides' ASTs, not their text.
+
+Runs entirely read-only: `git merge-tree --write-tree` computes the merge in the object
+store without touching the worktree or the index. Nothing here mutates the repository.
+
+Usage:
+    scripts/upstream-survey [--ref upstream/main] [--quiet]
+
+Exit status is 0 whenever the survey completes; a non-empty conflict surface is a fact
+to read, not a failure. Exit 2 means the survey itself could not run.
+"""
+from __future__ import annotations
+
+import argparse
+import ast
+import subprocess
+import sys
+from pathlib import Path
+
+
+def run(*args: str, check: bool = True) -> str:
+    result = subprocess.run(
+        ["git", *args], capture_output=True, text=True, cwd=REPO_ROOT
+    )
+    if check and result.returncode != 0:
+        raise SystemExit(f"upstream-survey: `git {' '.join(args)}` failed: {result.stderr.strip()}")
+    return result.stdout
+
+
+def blob(ref: str, path: str) -> str | None:
+    result = subprocess.run(
+        ["git", "show", f"{ref}:{path}"], capture_output=True, text=True, cwd=REPO_ROOT
+    )
+    return result.stdout if result.returncode == 0 else None
+
+
+def looks_like_python(path: str, source: str | None) -> bool:
+    if source is None:
+        return False
+    if path.endswith(".py"):
+        return True
+    first = source.split("\n", 1)[0]
+    return first.startswith("#!") and "python" in first
+
+
+def top_level_defs(source: str) -> dict[str, str]:
+    """Map every module-level function name to a normalized signature string."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return {}
+    out: dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            returns = ast.unparse(node.returns) if node.returns else "<none>"
+            params = ", ".join(
+                a.arg + (f": {ast.unparse(a.annotation)}" if a.annotation else "")
+                for a in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]
+            )
+            out[node.name] = f"({params}) -> {returns}"
+    return out
+
+
+def conflict_surface(ref: str) -> dict[str, int]:
+    """Files git will mark as conflicted, with the number of conflict hunks in each."""
+    result = subprocess.run(
+        ["git", "merge-tree", "--write-tree", ref, "HEAD"],
+        capture_output=True, text=True, cwd=REPO_ROOT,
+    )
+    if not result.stdout.strip():
+        raise SystemExit(f"upstream-survey: merge-tree produced no output: {result.stderr.strip()}")
+    tree = result.stdout.splitlines()[0].strip()
+    files = [
+        line.split("Merge conflict in ", 1)[1].strip()
+        for line in result.stdout.splitlines()
+        if "Merge conflict in " in line
+    ]
+    surface: dict[str, int] = {}
+    for path in files:
+        merged = blob(tree, path) or ""
+        surface[path] = sum(1 for ln in merged.splitlines() if ln.startswith("<<<<<<<"))
+    return surface
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Read-only pre-merge survey against upstream.")
+    parser.add_argument("--ref", default="upstream/main", help="upstream ref (default: upstream/main)")
+    parser.add_argument("--quiet", action="store_true", help="suppress the clean-file lines")
+    args = parser.parse_args()
+    ref = args.ref
+
+    if not run("rev-parse", "--verify", "--quiet", ref, check=False).strip():
+        print(f"upstream-survey: ref {ref!r} not found. Try: git fetch upstream", file=sys.stderr)
+        return 2
+
+    base = run("merge-base", ref, "HEAD").strip()
+    behind, ahead = run("rev-list", "--left-right", "--count", f"{ref}...HEAD").split()
+
+    print("=" * 74)
+    print(f"UPSTREAM SURVEY  {ref}")
+    print("=" * 74)
+    print(f"  merge-base   {base}")
+    print(f"  upstream tip {run('rev-parse', ref).strip()}")
+    print(f"  fork tip     {run('rev-parse', 'HEAD').strip()}")
+    print(f"  drift        {behind} behind / {ahead} ahead")
+
+    if behind == "0":
+        print("\nAlready up to date with upstream. Nothing to survey.")
+        return 0
+
+    surface = conflict_surface(ref)
+    print(f"\nMARKED CONFLICTS -- git will flag these ({len(surface)} files, "
+          f"{sum(surface.values())} hunks)")
+    if not surface:
+        print("  (none)")
+    for path, hunks in sorted(surface.items(), key=lambda kv: -kv[1]):
+        print(f"  {hunks:>4}  {path}")
+
+    # The silent traps. Scan every Python file that differs between the two sides --
+    # NOT just the conflicted ones. A file that auto-merges cleanly is exactly where
+    # this damage hides.
+    changed = {
+        line.strip()
+        for line in run("diff", "--name-only", f"{base}..{ref}").splitlines()
+        if line.strip()
+    }
+
+    deletions: list[tuple[str, list[str]]] = []
+    drift: list[tuple[str, list[tuple[str, str, str]]]] = []
+
+    for path in sorted(changed):
+        up_src, fork_src = blob(ref, path), blob("HEAD", path)
+        if fork_src is None or up_src is None:
+            continue  # added or removed wholesale; git handles those visibly
+        if not (looks_like_python(path, fork_src) and looks_like_python(path, up_src)):
+            continue
+        fork_defs, up_defs = top_level_defs(fork_src), top_level_defs(up_src)
+        if not fork_defs:
+            continue
+
+        gone = sorted(set(fork_defs) - set(up_defs))
+        if gone:
+            deletions.append((path, gone))
+
+        changed_sigs = [
+            (name, fork_defs[name], up_defs[name])
+            for name in sorted(set(fork_defs) & set(up_defs))
+            if fork_defs[name] != up_defs[name]
+        ]
+        if changed_sigs:
+            drift.append((path, changed_sigs))
+
+    print("\nSILENT TRAP 1 -- fork-only symbols (a 'take upstream' resolution deletes these)")
+    if not deletions:
+        print("  (none)")
+    for path, names in deletions:
+        print(f"  {path}")
+        for name in names:
+            print(f"      - {name}")
+
+    print("\nSILENT TRAP 2 -- signature drift (may auto-merge into a mixed convention)")
+    if not drift:
+        print("  (none)")
+    for path, sigs in drift:
+        print(f"  {path}")
+        for name, fork_sig, up_sig in sigs:
+            print(f"      {name}")
+            print(f"          fork:     {fork_sig}")
+            print(f"          upstream: {up_sig}")
+
+    print("\nNext: docs/UPSTREAM-SYNC.md -- resolution policy and the authorization this needs.")
+    return 0
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+if __name__ == "__main__":
+    raise SystemExit(main())
