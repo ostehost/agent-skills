@@ -1,6 +1,21 @@
 # AGENTS.md
 
-Public shared skills for agent workflows.
+Public shared skills for agent workflows. Canonical catalog lives here; do not
+edit generated/vendor copies in downstream repos — update here, then sync.
+
+## Commands
+
+- `scripts/validate-skills` — skill frontmatter + `skills.sh.json` shape gate
+- `scripts/run-checks` — local mirror of `.github/workflows/validate.yml`
+- `scripts/install-skills` — list/install skills into an agent skills directory
+- Dev deps for validation: `python3 -m pip install -r requirements-dev.txt`
+  (PyYAML). Prefer an interpreter outside this tree when running autoreview
+  isolation self-tests (see `scripts/run-checks` header).
+
+No root `justfile` and no fleet local-eight recipe names. That is intentional:
+this repo is an upstream-facing skills fork; inventing a just facade creates
+merge friction without a consumer here. Do not claim Universal 8 or local-eight
+conformance, and do not invent a root `verify`.
 
 ## Rules
 
@@ -18,8 +33,8 @@ Public shared skills for agent workflows.
 - `skills/<name>/agents/openai.yaml` (behavior-validator, session-viewer) is a
   host-read agent config for OpenAI-compatible hosts; repo tooling does not
   validate it.
-- Validate after edits: `scripts/validate-skills`.
-- Do not edit generated/vendor copies in downstream repos; update here, then sync.
+- After skill or catalog edits, run `scripts/validate-skills`; use
+  `scripts/run-checks` before claiming CI parity.
 
 ## Architecture
 
@@ -42,3 +57,9 @@ Public shared skills for agent workflows.
 See README.md's "Included Skills" list for the current skill inventory —
 kept there as the single copy so this section can't drift out of sync with it
 again.
+
+## Safety
+
+- Preserve pre-existing dirty/unrelated work; stage only owned paths.
+- Do not commit, push, tag, or publish without explicit authorization.
+- Product depth stays in README/VISION/`docs/`; keep this file operational.
