@@ -156,6 +156,7 @@ class AutoreviewHardeningTests(unittest.TestCase):
                 )
                 self.assertEqual(command[3], "--since-commit")
                 self.assertEqual(command[5:7], ["--branch", "HEAD"])
+                self.assertEqual(command[2], "file://.")
                 self.assertEqual(
                     command[7:],
                     [
@@ -165,10 +166,7 @@ class AutoreviewHardeningTests(unittest.TestCase):
                         "--fail-on-scan-errors",
                     ],
                 )
-                scan_path = command[2].removeprefix("file://")
-                if os.name == "nt":
-                    scan_path = scan_path.lstrip("/")
-                scan_repo = Path(scan_path)
+                scan_repo = cwd
                 commits = git(
                     scan_repo,
                     "log",
@@ -641,6 +639,130 @@ class AutoreviewHardeningTests(unittest.TestCase):
                         git(scan_repo, "show", f"{commits[2]}:{expected_path}"),
                         expected_content,
                     )
+
+    @unittest.skipIf(os.name == "nt", "Windows uses an exclusive snapshot handle")
+    def test_posix_snapshot_stat_signature_ignores_access_time_but_retains_change_time(
+        self,
+    ) -> None:
+        before = mock.Mock(
+            st_dev=1,
+            st_ino=2,
+            st_mode=stat.S_IFREG,
+            st_size=4,
+            st_atime_ns=10,
+            st_mtime_ns=20,
+            st_ctime_ns=30,
+        )
+        after_read = mock.Mock(
+            st_dev=1,
+            st_ino=2,
+            st_mode=stat.S_IFREG,
+            st_size=4,
+            st_atime_ns=11,
+            st_mtime_ns=20,
+            st_ctime_ns=30,
+        )
+        after_mutation = mock.Mock(
+            st_dev=1,
+            st_ino=2,
+            st_mode=stat.S_IFREG,
+            st_size=4,
+            st_atime_ns=11,
+            st_mtime_ns=20,
+            st_ctime_ns=31,
+        )
+
+        signature = self.helper["posix_snapshot_stat_signature"]
+
+        self.assertEqual(signature(before), signature(after_read))
+        self.assertNotEqual(signature(before), signature(after_mutation))
+
+    @unittest.skipUnless(os.name == "nt", "Windows handle sharing is required")
+    def test_windows_snapshot_reader_denies_a_same_size_writer(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            source = Path(tempdir) / "review.txt"
+            original = b"review\n"
+            source.write_bytes(original)
+            writer_result: dict[str, OSError | None] = {"error": None}
+
+            with self.helper["open_windows_snapshot_file"](source) as reader:
+                def write_same_size_content() -> None:
+                    try:
+                        with source.open("r+b", buffering=0) as writer:
+                            writer.write(b"changed\n")
+                            writer.flush()
+                            os.fsync(writer.fileno())
+                    except OSError as exc:
+                        writer_result["error"] = exc
+
+                writer = threading.Thread(target=write_same_size_content)
+                writer.start()
+                writer.join(timeout=5)
+                self.assertFalse(writer.is_alive(), "writer did not complete")
+
+                self.assertIsInstance(writer_result["error"], PermissionError)
+                self.assertEqual(reader.read(), original)
+
+    @unittest.skipUnless(os.name == "nt", "Windows handle identity is required")
+    def test_worktree_snapshot_rejects_file_replaced_before_windows_open(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as tempdir,
+            tempfile.TemporaryDirectory() as snapshot_dir,
+        ):
+            repo = Path(tempdir)
+            source = repo / "review.txt"
+            replacement = repo / "replacement.txt"
+            source.write_bytes(b"trusted\n")
+            replacement.write_bytes(b"changed\n")
+            original_open = self.helper["open_windows_snapshot_file"]
+
+            def replace_then_open(path: Path) -> io.BufferedReader:
+                replacement.replace(source)
+                return original_open(path)
+
+            with (
+                mock.patch.dict(
+                    self.helper["copy_worktree_file"].__globals__,
+                    {"open_windows_snapshot_file": replace_then_open},
+                ),
+                self.assertRaisesRegex(SystemExit, "file changed while opening"),
+            ):
+                self.helper["copy_worktree_file"](
+                    repo,
+                    Path(snapshot_dir),
+                    "review.txt",
+                )
+
+            self.assertFalse((Path(snapshot_dir) / "review.txt").exists())
+
+    def test_worktree_snapshot_ignores_access_time_changes_caused_by_read(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as tempdir,
+            tempfile.TemporaryDirectory() as snapshot_dir,
+        ):
+            repo = Path(tempdir)
+            source = repo / "review.txt"
+            source.write_text("review\n", encoding="utf-8")
+            source_stat = source.stat()
+            os.utime(
+                source,
+                ns=(
+                    source_stat.st_atime_ns - 3_000_000_000,
+                    source_stat.st_mtime_ns,
+                ),
+            )
+
+            copied = self.helper["copy_worktree_file"](
+                repo,
+                Path(snapshot_dir),
+                "review.txt",
+            )
+
+            self.assertTrue(copied)
+            self.assertEqual(
+                (Path(snapshot_dir) / "review.txt").read_text(encoding="utf-8"),
+                "review\n",
+            )
 
     def test_trufflehog_findings_and_errors_do_not_leak_scanner_output(self) -> None:
         for returncode, expected in (
@@ -4262,10 +4384,8 @@ class AutoreviewHardeningTests(unittest.TestCase):
             ) -> subprocess.CompletedProcess[str]:
                 if command[0] != "/trusted/trufflehog":
                     return original_run(command, cwd, **_kwargs)
-                scan_path = command[2].removeprefix("file://")
-                if os.name == "nt":
-                    scan_path = scan_path.lstrip("/")
-                scan_repo = Path(scan_path)
+                self.assertEqual(command[2], "file://.")
+                scan_repo = cwd
                 commits = git(
                     scan_repo,
                     "log",
