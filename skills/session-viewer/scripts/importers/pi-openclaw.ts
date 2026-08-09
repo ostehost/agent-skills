@@ -23,15 +23,21 @@ import type {
   SessionImporter,
 } from "../core/types.ts";
 
+function isoFromEpochMillis(value: unknown): string | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+}
+
 function timestampOf(
   entry: Record<string, unknown>,
   message?: Record<string, unknown>,
 ): string | undefined {
   return (
     firstText(entry, ["timestamp", "createdAt", "updatedAt"]) ??
-    (typeof message?.timestamp === "number"
-      ? new Date(message.timestamp).toISOString()
-      : undefined)
+    isoFromEpochMillis(message?.timestamp)
   );
 }
 
