@@ -92,11 +92,10 @@ mkdir -p ~/.codex/skills
 ln -sfn "$(pwd)/skills" ~/.codex/skills/agent-skills
 ```
 
-For Claude Code, symlink this repo into `~/.claude/skills`:
+For Claude Code, use the target-aware installer so an existing real directory is not turned into a nested `skills/skills` link:
 
 ```sh
-mkdir -p ~/.claude
-ln -sfn "$(pwd)/skills" ~/.claude/skills
+scripts/install-skills --target ~/.claude/skills
 ```
 
 If `~/.claude/skills` already points at another shared skills folder, add
