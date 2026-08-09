@@ -159,7 +159,6 @@ class AutoreviewHardeningTests(unittest.TestCase):
                 self.assertEqual(
                     command[7:],
                     [
-                        "--no-update",
                         "--no-color",
                         "--results=verified,unknown",
                         "--fail",
