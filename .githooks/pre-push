@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Per-repo pre-push gate — this repository's ONLY push gate.
+#
+# No justfile exists here by policy (upstream-facing skills fork; see
+# AGENTS.md "Commands"), so the governed global hook
+# (~/.config/git/hooks/pre-push) has nothing to run for this repo: its
+# `just ci` branch never engages, and its ecosystem auto-detection
+# (biome/eslint/bun/npm/cargo/go) matches nothing in a plain-scripts
+# Python/Node tree. Before this file existed, a push ran ZERO checks and
+# still printed success.
+#
+# scripts/run-checks is the gate: it mirrors .github/workflows/validate.yml
+# step-for-step, so green here means green in CI. It is deliberately
+# fail-closed — a missing dev dependency (PyYAML) exits 2 and blocks the
+# push. Install it (`python3 -m pip install -r requirements-dev.txt`, or the
+# repo-local .venv the script header describes) rather than bypassing; a gate
+# that self-skips on missing tools is a false green.
+#
+# RAN_JUST_CI can never be 1 here (no justfile), so there is nothing to
+# coordinate with. If a justfile with a `ci` recipe ever lands, add the
+# RAN_JUST_CI skip — see config/.githooks/pre-push for the pattern.
+# Emergency bypass (discouraged): git push --no-verify
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+echo "🧪 [agent-skills] scripts/run-checks (CI mirror)…"
+exec scripts/run-checks
