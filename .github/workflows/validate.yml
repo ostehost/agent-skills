@@ -32,15 +32,6 @@ jobs:
         run: |
           python scripts/install-skills.test.py
           python scripts/validate-skills.test.py
-      - name: Run autoreview self-tests
-        run: |
-          python skills/autoreview/scripts/autoreview --self-test-config-defaults
-          python skills/autoreview/scripts/autoreview --self-test-fallback-scope
-          python skills/autoreview/scripts/autoreview --self-test-engine-isolation
-          python skills/autoreview/scripts/autoreview --self-test-json-array-parser
-          python skills/autoreview/scripts/autoreview --self-test-opencode-jsonl-parser
-          python skills/autoreview/scripts/autoreview --self-test-opencode-isolation
-          python skills/autoreview/scripts/autoreview --self-test-cursor-jsonl-parser
       - name: Run Python tests
         # Keep this module list byte-identical to the "python tests" step in scripts/run-checks.
         run: python -m unittest skills/autoreview/scripts/autoreview_test.py skills.autoreview.tests.test_autoreview_hardening skills.autoreview.tests.test_receipt_contract skills.autoreview.tests.test_merge_invariants

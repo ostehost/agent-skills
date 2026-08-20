@@ -71,13 +71,18 @@ FORK_ONLY_FUNCTIONS = (
     "source_snapshot_digest",
     "verify_receipt_document",
     "_jcs_serialize",
+    # classify_receipt_error's dependency. Upstream deleted this helper in the
+    # 2026-08-20 sync, so it is fork-only again and a wholesale replacement
+    # would take classify_receipt_error's error taxonomy down with it.
+    "is_structured_output_failure",
     # review target binding and expectations
     "enforce_review_expectations",
     "parse_binding_pairs",
     "resolve_commit_sha",
     "review_target_binding",
-    # bounded parallel test execution
-    "signal_parallel_test_group",
+    # 2026-08-20: "bounded parallel test execution" (signal_parallel_test_group)
+    # was deliberately dropped when the fork yielded --parallel-tests to
+    # upstream's removal. It is gone on purpose, not lost to a resolution.
 )
 
 

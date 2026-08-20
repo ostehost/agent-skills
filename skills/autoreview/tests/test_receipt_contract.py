@@ -62,6 +62,26 @@ def load_helper() -> dict[str, object]:
     return runpy.run_path(str(SCRIPT), run_name="autoreview_under_test")
 
 
+_ENGINE_HELPERS: dict[str, object] | None = None
+
+
+def engine_test_helpers() -> dict[str, object]:
+    """Fake-engine builders and the TruffleHog stub, from the sibling suite.
+
+    They used to live in the script itself; upstream moved them into the test
+    modules (ae1eebc, ca100e6). Loading the sibling by path keeps this suite
+    working whether it runs as a package module or directly, and keeps the
+    stubs tracking upstream instead of drifting into a fork-local copy.
+    """
+    global _ENGINE_HELPERS
+    if _ENGINE_HELPERS is None:
+        _ENGINE_HELPERS = runpy.run_path(
+            str(Path(__file__).with_name("test_autoreview_hardening.py")),
+            run_name="autoreview_hardening_under_test",
+        )
+    return _ENGINE_HELPERS
+
+
 def git(repo: Path, *args: str) -> str:
     env = os.environ.copy()
     env.update(
@@ -189,8 +209,9 @@ class ReceiptContractTests(unittest.TestCase):
         git(repo, "add", "a.txt")
         git(repo, "commit", "-qm", "base")
         (repo / "a.txt").write_text("hello world\n", encoding="utf-8")
-        script = fake_script if fake_script is not None else self.helper["fake_codex_script"]()
-        codex_bin = self.helper["write_executable"](tempdir / "codex", script)
+        helpers = engine_test_helpers()
+        script = fake_script if fake_script is not None else helpers["fake_codex_script"]()
+        codex_bin = helpers["write_executable"](tempdir / "codex", script)
         record = tempdir / "record.json"
         env = os.environ.copy()
         env.update(
@@ -200,15 +221,12 @@ class ReceiptContractTests(unittest.TestCase):
                 "USERPROFILE": str(tempdir),
             }
         )
-        # Upstream's heuristics-to-TruffleHog migration made the preflight scan a REQUIRED
-        # tool, and CI does not install the real binary. Stub it the same way the hardening
-        # suite does (add_fake_trufflehog) so these receipt tests exercise the receipt, not
-        # the availability of an external scanner.
-        self.helper["write_executable"](
-            tempdir / "trufflehog",
-            "#!/usr/bin/env python3\nraise SystemExit(0)\n",
-        )
-        env["PATH"] = f"{tempdir}{os.pathsep}{env.get('PATH', '')}"
+        # Upstream's fail-closed TruffleHog pack scan (ca100e6) makes the scanner a REQUIRED
+        # tool, and CI does not install the real binary. Reuse the hardening suite's own stub
+        # so these receipt tests exercise the receipt, not the availability of an external
+        # scanner -- and so the stub follows upstream if its contract changes. This also
+        # prepends tempdir to PATH, which is what makes the fake codex binary discoverable.
+        helpers["add_fake_trufflehog"](self.helper, tempdir, env)
         return {
             "repo": repo,
             "codex_bin": codex_bin,
@@ -409,17 +427,6 @@ class ReceiptContractTests(unittest.TestCase):
                 workspace["record"].exists(),
                 "the review engine must not run after a scope mismatch",
             )
-
-    @unittest.skipIf(os.name == "nt", "the true/false commands are POSIX-only")
-    def test_parallel_test_failure_is_never_a_clean_receipt(self) -> None:
-        with tempfile.TemporaryDirectory() as tempdir:
-            workspace = self.make_workspace(Path(tempdir))
-            result = self.run_cli(workspace, "--parallel-tests", "false")
-            self.assertEqual(result.returncode, 1, result.stderr)
-            _, payload = self.load_receipt(workspace)
-            self.assertEqual(payload["status"], "error")
-            self.assertEqual(payload["error"]["kind"], "parallel_tests_failed")
-
     @unittest.skipIf(os.name == "nt", "the fake executables are POSIX-only")
     def test_stdout_echoes_the_artifact_digest_as_a_second_channel(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -506,20 +513,6 @@ class ReceiptContractTests(unittest.TestCase):
                 "no reviewer may run for an unsatisfiable receipt contract",
             )
             self.assertFalse(workspace["receipt"].exists())
-
-    @unittest.skipIf(os.name == "nt", "the fake executables are POSIX-only")
-    def test_allow_partial_panel_is_rejected_with_receipt_output(self) -> None:
-        with tempfile.TemporaryDirectory() as tempdir:
-            workspace = self.make_workspace(Path(tempdir))
-            result = self.run_cli(workspace, "--reviewers", "codex,claude", "--allow-partial-panel")
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("--allow-partial-panel is incompatible with --receipt-output", result.stderr)
-            self.assertFalse(
-                workspace["record"].exists(),
-                "no reviewer may run when the receipt contract is unsatisfiable",
-            )
-            self.assertFalse(workspace["receipt"].exists())
-
     def test_changed_paths_digest_is_injective_for_newline_paths(self) -> None:
         snapshot = ("0" * 40, "", ())
         binding_one = self.helper["review_target_binding"](

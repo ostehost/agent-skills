@@ -3,11 +3,12 @@
 # Mirrors that workflow step-for-step so a green run here means a green run in CI.
 # Directly runnable, no build step (AGENTS.md "Architecture").
 #
-# INTERPRETER: uses `python3`/`node` from PATH. Do NOT point this at the in-repo
-# .venv — skills/autoreview/scripts/autoreview:2076 (find_command) deliberately
-# refuses any executable inside the repo under review, so --self-test-opencode-isolation
-# fails when invoked by an in-repo interpreter. That refusal is the feature; install
-# requirements-dev.txt into an interpreter that lives outside this tree instead.
+# INTERPRETER: uses `python3`/`node` from PATH, falling back to the in-repo .venv
+# only for the two steps that import PyYAML. The autoreview interpreter guard
+# (find_command, skills/autoreview/scripts/autoreview) still refuses any executable
+# inside the repo under review, but the self-tests that made an in-repo interpreter
+# fail outright were removed upstream in the 2026-08-20 sync; the remaining suites
+# pass under either interpreter. Prefer an interpreter outside this tree anyway.
 set -uo pipefail
 # Fail loudly rather than checking whatever directory we happen to be in.
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" \
@@ -36,7 +37,7 @@ command -v "$NODE" >/dev/null || { echo "run-checks: $NODE not on PATH" >&2; exi
 # interpreter. CI installs requirements-dev.txt into its setup-python, so one interpreter
 # covers everything there. Locally the repo's own .venv/ (gitignored) usually carries
 # PyYAML, and it is safe for these two steps precisely because they are plain repo tooling
-# — unlike the autoreview self-tests above, nothing here enforces an out-of-repo binary.
+# that never re-invokes autoreview, so the interpreter guard never sees it.
 PY_YAML="$PY"
 if ! "$PY" -c 'import yaml' 2>/dev/null; then
   if [ -x .venv/bin/python ] && .venv/bin/python -c 'import yaml' 2>/dev/null; then
@@ -70,11 +71,6 @@ step "check python scripts" \
 
 step "repository script tests: install-skills" "$PY" scripts/install-skills.test.py
 step "repository script tests: validate-skills" "$PY_YAML" scripts/validate-skills.test.py
-
-for t in config-defaults fallback-scope engine-isolation json-array-parser \
-         opencode-jsonl-parser opencode-isolation cursor-jsonl-parser; do
-  step "autoreview self-test: $t" "$PY" skills/autoreview/scripts/autoreview "--self-test-$t"
-done
 
 # Keep this module list byte-identical to the "Run Python tests" step in
 # .github/workflows/validate.yml -- the two gates must not drift.

@@ -175,8 +175,37 @@ The fork's `list[str]` truncation reasons became upstream's `bool`:
 referenced them, so nothing degraded. `skills/autoreview/CLAUDE.md` is explicit that this file
 is canonical upstream and must not carry repo-local behaviour variants.
 
-Use the gated `test_receipt_contract` (32 tests) as the specification for the re-applied
+Use the gated `test_receipt_contract` (30 tests) as the specification for the re-applied
 receipt layer, and the survey's trap-1a list as the re-application checklist.
+
+**2026-08-20 refinement: decide the fork's policy questions BEFORE resolving, and the
+construction follows from them.** That round asked the owner two questions up front —
+keep or yield panels and `--parallel-tests`, and keep or take `SKILL.md` — and both
+answers were "yield". With the competition settled in advance, "write the union by hand"
+stopped meaning "edit 30 conflict regions in a 22,000-line conflicted file" and became
+"take upstream's file as the base, then re-apply the fork layer onto it". Same union,
+built by construction rather than by marker-editing, and far less error-prone. The
+warning above still stands for the case where the two sides genuinely compete: settle
+the competition first, then pick the cheaper construction.
+
+Re-applying the receipt layer means its **dependency closure**, not just the trap-1a list.
+Two symbols that list does not name were needed: `is_structured_output_failure` (upstream
+deleted it, but `classify_receipt_error` calls it) and the `args.model_used` assignment on
+the Codex success path (the receipt attests which model actually ran after a Sol-to-Terra
+retry). Both were caught by the gated suite, not by the survey. Conversely, resist
+re-applying fork code that carries no behaviour: `_ActivityStreamDisplay` was a pure DRY
+refactor of bookkeeping upstream duplicates, with no test and no contract, so it was
+dropped to shrink the delta.
+
+**Taking an upstream test file wholesale can lose a local environment adaptation.** The
+fork had added `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_NOSYSTEM`/`GIT_CONFIG_SYSTEM` to the `git()`
+helper in `test_autoreview_hardening.py`, keeping its temporary repos hermetic. Upstream's
+copy lacks them, so a clean "take upstream" made 16 tests fail on this machine: the
+inherited `core.hooksPath` commit-msg hook rejects the fixtures' plain commit messages.
+This is a trap-4 sibling worth its own check — after taking an upstream test file, run it
+before assuming it is fine, and re-apply any local hermeticity the fork had added. It is
+also a good upstreaming candidate: it costs upstream nothing and makes the suite hermetic
+for every contributor.
 
 ## Invariants that must not move
 
@@ -221,4 +250,5 @@ add a justfile here.
 | Date | Upstream tip | Merge-base after | Drift before | Notes |
 | --- | --- | --- | --- | --- |
 | 2026-08-02 | `95e443f` | `95e443f` | 66 behind / 48 ahead | **Synced.** Merge commit `42bc00d`; 8 conflicts / 23 hunks. The owner ran `git merge upstream/main` by hand — the hook denies it for agents. Tests 267 → 378. Closed the TruffleHog and `RecursionError` gap on the redaction path (`trufflehog` refs 0 → 31). Adopted upstream's `bool` truncation convention. Dropped `unified_diff_metadata` as a supersession, not a fork feature. All five trap classes fired; each is documented above because each cost time. |
-| 2026-08-10 | `94b2193` | `94b2193` | 12 behind / 54 ahead | **Synced.** Merge commit `24b631f`; 5 conflicts / 9 hunks. Adopted upstream's isolated Amp engine, owned process-group cleanup, real dry-run preflight, JavaScript secret-reference handling, Windows/OpenCode portability fixes, session timestamp guard, `readme-standard` skill, and setup-action updates. Preserved the fork's digest-bound receipts, bounded failed-review test cleanup, structured-output retries, and design catalog entry. Added the shared `numberValue` helper needed by the fork-refactored session importer. `scripts/run-checks` passed; the interpreter-guard hash remained `5b3d5b7497fc217c`; post-merge drift is 0 behind / 55 ahead. |
+| 2026-08-10 | `94b2193` | **`95e443f` (unchanged)** | 12 behind / 54 ahead | **Cherry-picked, not merged.** *Corrected 2026-08-20:* this row originally claimed merge commit `24b631f` and merge-base `94b2193`. Neither exists in this history — `git log --merges` shows nothing after `42bc00d`, and the base never moved off `95e443f`. The round was twelve cherry-picks of `#161`-`#174`; the content landed faithfully (`beam`, `crabbox`, `readme-standard`, `behavior-validator` were byte-identical to upstream at `94b2193`) but no second parent was recorded. Cost, paid on 2026-08-20: two of that sync's six conflicts existed *only* because the base was stale, and the survey's Trap 1b list inflated to 110+ symbols mixing real deletions with frozen-base artifacts. This is the playbook's own warning, observed. Adopted upstream's isolated Amp engine, owned process-group cleanup, real dry-run preflight, JavaScript secret-reference handling, Windows/OpenCode portability fixes, session timestamp guard, `readme-standard` skill, and setup-action updates. Preserved the fork's digest-bound receipts, bounded failed-review test cleanup, structured-output retries, and design catalog entry. Added the shared `numberValue` helper needed by the fork-refactored session importer. `scripts/run-checks` passed; the interpreter-guard hash remained `5b3d5b7497fc217c`; post-merge drift is 0 behind / 55 ahead. |
+| 2026-08-20 | `88f8500` | `88f8500` | 23 behind / 68 ahead | **Synced.** 6 conflicts / 63 hunks — but only 11 of the 23 commits carried new content; 12 were the 08-10 cherry-picks re-presented by the stale base. Two conflicts (`skills.sh.json`, `pi-openclaw.ts`) were pure stale-base artifacts, resolved `--ours` after verifying the fork already carried the content. Upstream contracted hard: `autoreview` went 13,215 -> 6,034 lines across four unreviewed direct-to-main pushes (`4e3f4cf`, `ae1eebc`, `1ef3fab`, `ca100e6`). **Two owner decisions:** yield panels and `--parallel-tests` to upstream's removal, and take `SKILL.md` wholesale per `skills/autoreview/CLAUDE.md`. That collapsed three more conflicts to `git checkout upstream/main --`, leaving one real file. Adopted upstream's fail-closed TruffleHog pack scanning (replacing the whole local secret classifier), bounded engine runtime (`--engine-timeout-seconds`), portable Fable selector, strict beam share URLs, and crabbox portability. Preserved the receipt layer by construction — upstream's file as the base, the 17-symbol fork layer re-applied on top — verified against all 30 remaining `test_receipt_contract` tests. Retired 2 of its 32 tests (`parallel_tests_failed`, `allow_partial_panel`) as dead with the dropped features. `scripts/run-checks` green; 229 Python tests; interpreter guard still `5b3d5b7497fc217c`. |
