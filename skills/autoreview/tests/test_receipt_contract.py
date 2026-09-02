@@ -122,6 +122,10 @@ import os
 import sys
 from pathlib import Path
 
+args = sys.argv[1:]
+if "--version" in args or "-v" in args:
+    print("codex-cli 0.0.0-test")
+    raise SystemExit(0)
 record = os.environ.get("AUTOREVIEW_FAKE_RECORD")
 if record:
     Path(record).write_text("invoked")
@@ -137,6 +141,9 @@ import sys
 from pathlib import Path
 
 args = sys.argv[1:]
+if "--version" in args or "-v" in args:
+    print("codex-cli 0.0.0-test")
+    raise SystemExit(0)
 sys.stdin.read()
 try:
     output_path = args[args.index("--output-last-message") + 1]
@@ -153,6 +160,9 @@ import sys
 from pathlib import Path
 
 args = sys.argv[1:]
+if "--version" in args or "-v" in args:
+    print("codex-cli 0.0.0-test")
+    raise SystemExit(0)
 sys.stdin.read()
 try:
     output_path = args[args.index("--output-last-message") + 1]
@@ -174,6 +184,9 @@ import sys
 from pathlib import Path
 
 args = sys.argv[1:]
+if "--version" in args or "-v" in args:
+    print("codex-cli 0.0.0-test")
+    raise SystemExit(0)
 sys.stdin.read()
 try:
     output_path = args[args.index("--output-last-message") + 1]
@@ -501,6 +514,17 @@ class ReceiptContractTests(unittest.TestCase):
         )
         self.assertEqual(neutralize("plain text"), "plain text")
 
+    def test_isolation_preflight_errors_are_engine_failures(self) -> None:
+        classify = self.helper["classify_receipt_error"]
+        self.assertEqual(
+            classify("Codex isolation preflight failed: version probe refused"),
+            "engine_failure",
+        )
+        self.assertEqual(
+            classify("review engine returned non-JSON output: invalid payload"),
+            "invalid_output",
+        )
+
     @unittest.skipIf(os.name == "nt", "the fake executables are POSIX-only")
     def test_expect_findings_is_rejected_with_receipt_output(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -655,14 +679,16 @@ class ReceiptContractTests(unittest.TestCase):
             parse(["a=" + "x" * 501])
 
     def test_prompt_bans_nested_reviewers(self) -> None:
-        with tempfile.TemporaryDirectory() as tempdir:
-            repo = init_repo(Path(tempdir))
-            prompt = self.helper["build_prompt"](repo, "local", None, "bundle", "", "")
-            self.assertIn("Do not invoke nested reviewers or review tools.", prompt)
-            self.assertIn(
-                "Forbidden nested review commands include: codex review, autoreview, claude review, oracle review.",
-                prompt,
-            )
+        prompt = self.helper["render_review_prompt"](
+            "main",
+            "local",
+            None,
+            self.helper["ReviewChunk"]("bundle"),
+            "",
+            "",
+        )
+        self.assertIn("Do not mutate files or external state", prompt)
+        self.assertIn("or invoke nested reviewers.", prompt)
 
     def test_receipt_digest_recompute_matches_documented_procedure(self) -> None:
         payload_text = '{"answer":42,"receipt_version":2}'

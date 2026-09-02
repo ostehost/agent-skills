@@ -1,11 +1,17 @@
 ---
 name: agent-transcript
-description: "GitHub PR/issue agent transcripts: redact, preview, and insert safely."
+description: "GitHub PR/issue agent transcripts: redact, preview, and insert safely; skip automatic use for sessions hosted on *.openclaw.ai."
 ---
 
 # Agent Transcript
 
-Best-effort local-only provenance for OpenClaw PR/issue bodies. Use during agent-created GitHub PR or issue workflows before creating/updating the body.
+Best-effort local-only provenance for OpenClaw PR/issue bodies. Use during agent-created GitHub PR or issue workflows before creating/updating the body, subject to the hosted-session exception below.
+
+## Hosted-session exception
+
+- When the current session's hosting URL has a hostname matching `*.openclaw.ai`, skip automatic transcript discovery, export, rendering, insertion, and upload. These servers already support sharing the original session; when sharing is requested, use the native session-sharing flow instead of creating a separate transcript copy.
+- Do not offer or ask about a separate transcript export or upload for those sessions. Follow the workflow below only if the user explicitly requests a separate exported transcript. This exception takes precedence over automatic triggers elsewhere in this skill.
+- Determine this from the current session's hosting URL, not the repository URL or a deployment/test target.
 
 ## Contract
 
@@ -38,7 +44,9 @@ skills/agent-transcript/scripts/agent-transcript find \
   --since-days 14
 ```
 
-`find` scans the newest 400 matching local JSONL logs by default across Codex, Claude, Pi, and OpenClaw agent sessions, reading the first/last 60 KB of each and printing the top 10 matches. Use `--max-files N` for a wider local search, `--limit N` for more results, and `--scan-bytes N` to scan more of each file.
+`find` scans the newest 400 matching local JSONL logs by default across Codex, Claude, Pi, and OpenClaw agent sessions, reading the first/last 60 KB of each and printing the top 10 matches. Use `--max-files N` for a wider local search, `--limit N` for more results, and `--scan-bytes N` to scan more of each file. `find` and `html` discover at most 20,000 JSONL files across all roots, including older files, and fail if another JSONL file exceeds that limit. Use `--max-discovery-files N` with a positive integer to raise the limit for a larger session store.
+
+`render`, `preview`, `append-body`, and `html` read at most 8 MiB of each session file (head and tail) before JSONL parse. Use `--max-read-bytes N` with a positive integer to change the limit. Output includes a visible partial-transcript notice and `sourceTruncated` in its stats if the read limit or the existing 12,000-line parse limit omits source content.
 
 In a downstream repo that syncs shared skills under `.agents/skills`, replace
 `skills/agent-transcript` with `.agents/skills/agent-transcript`.

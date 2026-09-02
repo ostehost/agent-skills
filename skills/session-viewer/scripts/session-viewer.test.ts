@@ -9,6 +9,7 @@ import vm from "node:vm";
 import { parseSessionDocument } from "./core/detect.ts";
 import { basename, parseJsonl } from "./core/jsonl.ts";
 import { buildSessionViewerHtml } from "./html.ts";
+import { resolveOpenBrowserCommand } from "./open-browser.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -86,6 +87,20 @@ test("basename returns the last non-empty path segment", () => {
   assert.equal(basename("dir/"), "dir");
   assert.equal(basename("/"), undefined);
   assert.equal(basename(undefined), undefined);
+});
+
+test("opens hostile Windows paths without a command shell", () => {
+  for (const filePath of [
+    "C:\\Reports\\session & calc.exe.html",
+    "C:\\Reports\\session | whoami.html",
+    "C:\\Reports\\%COMSPEC%.html",
+    "C:\\Reports\\session ^& echo injected.html",
+  ]) {
+    assert.deepEqual(resolveOpenBrowserCommand("win32", filePath), {
+      executable: "explorer.exe",
+      args: [filePath],
+    });
+  }
 });
 
 test("parses Codex rollout tool calls and outputs", () => {
