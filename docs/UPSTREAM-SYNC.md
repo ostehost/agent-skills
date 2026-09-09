@@ -50,6 +50,16 @@ they narrow the hook first. If narrowing: pin the **literal** string `upstream/m
 a glob. `git fetch` is unclassified, so a pattern like `upstream/sync-*` lets anyone fetch
 an arbitrary SHA into a matching ref name and mint themselves merge authority.
 
+Re-probed 2026-09-09, unchanged: the vendor-branch merge is still denied for agents, with no
+mutation. The cheapest owner path needs no hook change at all -- the owner runs the merge
+with a leading `!` in the agent's own session, and the agent resolves the conflicts in place.
+`git push` is separately denied to agents by the launcher permission broker, so publication
+is an owner step too; plan for both, not just the merge.
+
+The guard matches on the command string, so it also fires on a merge command quoted inside
+an unrelated `bash` heredoc -- documentation edits included. Write those with the file tools
+rather than fighting the pattern; the guard is doing its job.
+
 ## Procedure
 
 ### 1. Survey — read-only, costs nothing
@@ -60,6 +70,16 @@ an arbitrary SHA into a matching ref name and mint themselves merge authority.
 Reports drift, the marked conflict surface, and traps 1a/1b/2/3 below. It uses
 `git merge-tree --write-tree`, which computes the merge in the object store without
 touching the worktree or index. Safe to run at any time, including mid-investigation.
+
+**Resolve and gate against that tree before the merge runs.** `merge-tree` writes the real
+merged tree, so `git archive <tree> | tar -x -C <scratch>` materializes exactly what the merge
+will put in the worktree, conflict markers included. Resolve there, run the full gate there,
+and the merge itself becomes a formality: diff each conflicted file against the preview,
+confirm byte-identical, apply the resolution. On 2026-09-09 that reduced a 4-file / 9-hunk
+sync to one verification step, and it front-loads traps 4 and 5 -- which otherwise surface
+only after resolving -- to before the owner is asked to act at all. Keep the resolution in a
+script rather than editing markers by hand: that is what makes "identical to the preview"
+checkable instead of asserted, and it re-applies for free if the attempt is abandoned.
 
 ### 2. Gate before you resolve, not after
 
