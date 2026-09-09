@@ -11,7 +11,8 @@ repo. See [VISION.md](VISION.md) for catalog boundaries and admission principles
 
 ## Included Skills
 
-- `agent-transcript`: local-only, redacted PR/issue transcript provenance.
+- `agent-transcript`: local-only, redacted PR/issue transcripts, on explicit
+  request only.
 - `autoreview`: structured closeout/code-review workflow plus helper script.
 - `behavior-validator`: source-blind validation of user-visible behavior against
   a contract.
