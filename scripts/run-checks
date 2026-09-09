@@ -77,6 +77,8 @@ step "repository script tests: validate-skills" "$PY_YAML" scripts/validate-skil
 step "python tests" \
   "$PY" -m unittest skills/autoreview/scripts/autoreview_test.py \
     skills.autoreview.tests.test_autoreview_hardening \
+    skills.autoreview.tests.test_codex_sandbox \
+    skills.autoreview.tests.test_codex_inference_route \
     skills.autoreview.tests.test_receipt_contract \
     skills.autoreview.tests.test_merge_invariants
 

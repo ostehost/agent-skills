@@ -37,7 +37,7 @@ jobs:
           python scripts/validate-skills.test.py
       - name: Run Python tests
         # Keep this module list byte-identical to the "python tests" step in scripts/run-checks.
-        run: python -m unittest skills/autoreview/scripts/autoreview_test.py skills.autoreview.tests.test_autoreview_hardening skills.autoreview.tests.test_receipt_contract skills.autoreview.tests.test_merge_invariants
+        run: python -m unittest skills/autoreview/scripts/autoreview_test.py skills.autoreview.tests.test_autoreview_hardening skills.autoreview.tests.test_codex_sandbox skills.autoreview.tests.test_codex_inference_route skills.autoreview.tests.test_receipt_contract skills.autoreview.tests.test_merge_invariants
       - name: Check Node scripts
         run: |
           node --check skills/agent-transcript/scripts/agent-transcript

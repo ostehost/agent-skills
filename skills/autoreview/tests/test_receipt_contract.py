@@ -66,7 +66,7 @@ _ENGINE_HELPERS: dict[str, object] | None = None
 
 
 def engine_test_helpers() -> dict[str, object]:
-    """Fake-engine builders and the TruffleHog stub, from the sibling suite.
+    """Fake-engine builders, from the sibling suite.
 
     They used to live in the script itself; upstream moved them into the test
     modules (ae1eebc, ca100e6). Loading the sibling by path keeps this suite
@@ -234,12 +234,11 @@ class ReceiptContractTests(unittest.TestCase):
                 "USERPROFILE": str(tempdir),
             }
         )
-        # Upstream's fail-closed TruffleHog pack scan (ca100e6) makes the scanner a REQUIRED
-        # tool, and CI does not install the real binary. Reuse the hardening suite's own stub
-        # so these receipt tests exercise the receipt, not the availability of an external
-        # scanner -- and so the stub follows upstream if its contract changes. This also
-        # prepends tempdir to PATH, which is what makes the fake codex binary discoverable.
-        helpers["add_fake_trufflehog"](self.helper, tempdir, env)
+        # Upstream removed the TruffleHog preflight in #240 (intentional scanner-free
+        # policy), so there is no scanner to stub. The fake codex binary still has to be
+        # discoverable, which the stub used to arrange as a side effect of prepending
+        # tempdir to PATH -- do that explicitly now.
+        env["PATH"] = os.pathsep.join([str(tempdir), env.get("PATH", "")])
         return {
             "repo": repo,
             "codex_bin": codex_bin,
@@ -370,14 +369,7 @@ class ReceiptContractTests(unittest.TestCase):
             _, payload = self.load_receipt(workspace)
             self.assertEqual(payload["status"], "error")
             self.assertEqual(payload["error"]["kind"], "engine_failure")
-            # Upstream's preflight prints "trufflehog: clean (0.7s)"; that is not a
-            # receipt status. Check the receipt-bearing output, not the scanner line.
-            without_preflight = "\n".join(
-                line
-                for line in result.stdout.splitlines()
-                if not line.startswith("trufflehog: ")
-            )
-            self.assertNotIn("clean", without_preflight)
+            self.assertNotIn("clean", result.stdout)
 
     @unittest.skipIf(os.name == "nt", "the fake executables are POSIX-only")
     def test_invalid_structured_output_writes_error_receipt(self) -> None:
@@ -607,7 +599,7 @@ class ReceiptContractTests(unittest.TestCase):
                         "HOME": str(root),
                         "USERPROFILE": str(root),
                         # main() runs in-process here, so workspace["env"] never applies;
-                        # the TruffleHog preflight stub must reach the real environment.
+                        # the fake codex binary must stay discoverable on PATH.
                         "PATH": workspace["env"]["PATH"],
                     },
                 ), contextlib.redirect_stdout(io.StringIO()):
