@@ -225,7 +225,10 @@ test("dangling value flags fail with a usage error instead of misbehaving", () =
 
   const maxChars = runFailure(["render", "--session", session, "--max-chars"]);
   assert.match(maxChars.stderr, /--max-chars requires a numeric value/);
-  const cwd = runFailure(["find", "--query", "anything-here", "--cwd"]);
+  // `--root dir` keeps discovery inside the fixture: without it `find` walks this
+  // machine's real Codex/Claude/Pi/OpenClaw session roots, and a large local store
+  // trips the 20,000-file discovery cap before the dangling flag is ever validated.
+  const cwd = runFailure(["find", "--query", "anything-here", "--root", dir, "--cwd"]);
   assert.match(cwd.stderr, /--cwd requires a value/);
 });
 
