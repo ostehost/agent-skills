@@ -67,7 +67,9 @@ step "check python scripts" \
     skills/autoreview/scripts/test-review-harness.py \
     skills/autoreview/scripts/autoreview_test.py \
     skills/autoreview/tests/test_receipt_contract.py \
-    skills/autoreview/tests/test_merge_invariants.py
+    skills/autoreview/tests/test_merge_invariants.py \
+    skills/diataxis/scripts/audit_quadrant.py \
+    skills/diataxis/tests/test_audit_quadrant.py
 
 step "repository script tests: install-skills" "$PY" scripts/install-skills.test.py
 step "repository script tests: validate-skills" "$PY_YAML" scripts/validate-skills.test.py
@@ -80,7 +82,8 @@ step "python tests" \
     skills.autoreview.tests.test_codex_sandbox \
     skills.autoreview.tests.test_codex_inference_route \
     skills.autoreview.tests.test_receipt_contract \
-    skills.autoreview.tests.test_merge_invariants
+    skills.autoreview.tests.test_merge_invariants \
+    skills.diataxis.tests.test_audit_quadrant
 
 step "check node scripts" \
   "$NODE" --check skills/agent-transcript/scripts/agent-transcript

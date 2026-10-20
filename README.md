@@ -11,17 +11,21 @@ repo. See [VISION.md](VISION.md) for catalog boundaries and admission principles
 
 ## Included Skills
 
+Each skill lives in `skills/<name>/`, listed here alphabetically.
+
 - `agent-transcript`: local-only, redacted PR/issue transcripts, on explicit
   request only.
 - `autoreview`: structured closeout/code-review workflow plus helper script.
-- `behavior-validator`: source-blind validation of user-visible behavior against
-  a contract.
 - [`beam`](skills/beam/README.md): self-contained, authenticated, redacted
   publication of local coding sessions to a read-only OpenClaw catalog.
+- `behavior-validator`: source-blind validation of user-visible behavior against
+  a contract.
 - `crabbox`: Crabbox/Testbox remote validation workflow for broad or CI-parity
   proof.
 - `design-competition`: frontend generator-evaluator harness with Playwright or
   human review.
+- `diataxis`: Diátaxis quadrant receipts and a stdlib contamination audit for
+  `docs/` pages and READMEs.
 - `handoff`: path-free prompt handoff workflow for delegating a task to another
   agent.
 - `readme-standard`: house README structure, badge row, tone, and verification
@@ -168,6 +172,12 @@ skills/
     scripts/             # incl. run-axe.sh, recompute-gate.sh
     templates/
     tokens/
+  diataxis/
+    SKILL.md
+    references/          # per-quadrant authoring rules
+    scripts/             # audit_quadrant.py
+    tests/
+    evals/
   handoff/
     SKILL.md
   session-viewer/
@@ -206,6 +216,8 @@ node --check skills/agent-transcript/scripts/agent-transcript
 node --check skills/beam/scripts/beam
 node --check skills/beam/scripts/beam-session.js
 node --test skills/agent-transcript/scripts/agent-transcript.test.mjs skills/beam/scripts/beam.test.mjs skills/session-viewer/scripts/session-viewer.test.ts
+python3 -m py_compile skills/diataxis/scripts/audit_quadrant.py skills/diataxis/tests/test_audit_quadrant.py
+python3 -m unittest skills.diataxis.tests.test_audit_quadrant
 skills/design-competition/scripts/check-conformance.sh
 skills/design-competition/scripts/scripts.test.sh
 ```
@@ -222,6 +234,8 @@ Session exports can contain sensitive conversation data. Treat `session-viewer`
 HTML as local/private output unless it has been separately redacted and reviewed.
 
 ## Editing Rules
+
+These rules apply to every skill in this repo.
 
 - Keep descriptions short and useful for routing.
 - Keep skill bodies operational rather than essay-like.

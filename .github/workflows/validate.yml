@@ -30,14 +30,14 @@ jobs:
       - name: Check shell scripts
         run: bash -n skills/autoreview/scripts/test-review-harness
       - name: Check Python scripts
-        run: python -m py_compile scripts/install-skills scripts/install-skills.test.py scripts/upstream-survey scripts/validate-skills scripts/validate-skills.test.py skills/autoreview/scripts/autoreview skills/autoreview/scripts/test-review-harness.py skills/autoreview/scripts/autoreview_test.py skills/autoreview/tests/test_receipt_contract.py skills/autoreview/tests/test_merge_invariants.py
+        run: python -m py_compile scripts/install-skills scripts/install-skills.test.py scripts/upstream-survey scripts/validate-skills scripts/validate-skills.test.py skills/autoreview/scripts/autoreview skills/autoreview/scripts/test-review-harness.py skills/autoreview/scripts/autoreview_test.py skills/autoreview/tests/test_receipt_contract.py skills/autoreview/tests/test_merge_invariants.py skills/diataxis/scripts/audit_quadrant.py skills/diataxis/tests/test_audit_quadrant.py
       - name: Run repository script tests
         run: |
           python scripts/install-skills.test.py
           python scripts/validate-skills.test.py
       - name: Run Python tests
         # Keep this module list byte-identical to the "python tests" step in scripts/run-checks.
-        run: python -m unittest skills/autoreview/scripts/autoreview_test.py skills.autoreview.tests.test_autoreview_hardening skills.autoreview.tests.test_codex_sandbox skills.autoreview.tests.test_codex_inference_route skills.autoreview.tests.test_receipt_contract skills.autoreview.tests.test_merge_invariants
+        run: python -m unittest skills/autoreview/scripts/autoreview_test.py skills.autoreview.tests.test_autoreview_hardening skills.autoreview.tests.test_codex_sandbox skills.autoreview.tests.test_codex_inference_route skills.autoreview.tests.test_receipt_contract skills.autoreview.tests.test_merge_invariants skills.diataxis.tests.test_audit_quadrant
       - name: Check Node scripts
         run: |
           node --check skills/agent-transcript/scripts/agent-transcript

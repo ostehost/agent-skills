@@ -1,0 +1,40 @@
+{
+  "skill_name": "diataxis",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Write a tutorial in docs/ for first-time users of the CLI.",
+      "expected_output": "A Quadrant Classification Receipt (quadrant tutorial, operation create) printed before the first write; a page under docs/tutorials/ that follows one path, uses the tutor voice, and shows expected output after each step; and a strict audit of the new page that exits 0.",
+      "files": [],
+      "expectations": [
+        "The response prints a fenced json receipt with \"receipt\": \"diataxis/quadrant-classification\" before any Write or Edit call on the tutorial file.",
+        "The receipt sets quadrant to tutorial and names how-to as strongest_alternative with a one-line rejected_because.",
+        "The tutorial offers no alternatives or optional paths and contains no option tables.",
+        "The response reports `audit_quadrant.py --strict` on the new file with exit code 0."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Clean up docs/explanation/caching.md, it has shell commands in it.",
+      "expected_output": "A receipt for docs/explanation/caching.md with decision split and a split_plan that sends the commands to a how-to page under docs/how-to/; a receipt for the new how-to page; the explanation keeps the why and links the how-to; strict audits of both files exit 0.",
+      "files": [],
+      "expectations": [
+        "The receipt for caching.md lists exp-terminal-steps or exp-procedure-list in contamination_risks and sets decision to split.",
+        "The shell commands move to a page under docs/how-to/ whose H1 starts with How to.",
+        "The explanation page links the new how-to guide instead of repeating the commands.",
+        "Strict audits of both touched files are reported with exit code 0."
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Tighten the README install section.",
+      "expected_output": "A receipt with quadrant landing and handoff readme-standard; the README install section is edited under readme-standard's gates (commands run, links resolve); no docs/ quadrant restructuring happens.",
+      "files": [],
+      "expectations": [
+        "The receipt for README.md sets quadrant to landing and handoff to readme-standard.",
+        "The response applies readme-standard verification gates to the edited install commands.",
+        "No files under docs/ are created, moved, or deleted."
+      ]
+    }
+  ]
+}

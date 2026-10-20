@@ -25,7 +25,7 @@
     {
       "title": "Documentation",
       "description": "Skills for writing and reviewing project documentation.",
-      "skills": ["readme-standard"]
+      "skills": ["readme-standard", "diataxis"]
     }
   ]
 }
