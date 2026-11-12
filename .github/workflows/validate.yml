@@ -14,6 +14,7 @@ concurrency:
 
 jobs:
   installed-source:
+    if: github.repository == 'openclaw/agent-skills'
     name: installed source (${{ matrix.os }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10

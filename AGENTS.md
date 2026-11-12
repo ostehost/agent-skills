@@ -60,11 +60,15 @@ conformance, and do not invent a root `verify`.
   that is valid JSON referencing only existing skills (each in at most one
   grouping). Any malformed shape must yield a readable error, never a crash.
 - Keep `scripts/check-skills`, `scripts/check-skills.test.py`, and
-  `.github/workflows/validate.yml` byte-identical to upstream, except one fork
-  line in `validate.yml`: the `macos-sandbox` repository guard (see
-  `docs/UPSTREAM-SYNC.md`). Fork-only checks go in
+  `.github/workflows/validate.yml` byte-identical to upstream, except two fork
+  lines in `validate.yml`: the repository guards on `macos-sandbox` and
+  `installed-source` (see `docs/UPSTREAM-SYNC.md`). `fork-validate.yml` re-runs
+  upstream's installed-source test on the fork. Fork-only checks go in
   `scripts/check-fork` and `.github/workflows/fork-validate.yml`; fork-only
   tests go in `fork-tests/`, not `skills/autoreview/tests/`.
+- Track no symlink except the two in `scripts/check-fork`'s
+  `SANCTIONED_SYMLINKS` (`.agents/rules/project.md`, `.claude/skills/diataxis`).
+  Keep both as symlinks; never replace one with a copy.
 
 ## Layout
 

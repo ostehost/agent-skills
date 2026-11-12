@@ -37,8 +37,10 @@ FORK_PYTHON_SUITES = (
 # POSIX developer machines, so its self-test does not run on Windows.
 FORK_SCRIPT_TESTS = ("scripts/check-fork.test.py",)
 POSIX_SCRIPT_TESTS = ("scripts/run-checks.test.py",)
-# Upstream ships this suite but check-skills does not run it.
-FORK_NODE_TESTS = ("skills/beam/scripts/beam-handoff.test.mjs",)
+# Upstream ships this suite but check-skills does not run it. POSIX only: its
+# fake `openclaw` CLI is a shebang script, which Windows cannot execute, so
+# every gateway call in it fails there.
+POSIX_NODE_TESTS = ("skills/beam/scripts/beam-handoff.test.mjs",)
 # bash + jq; skipped only with --skip-design-competition.
 DESIGN_COMPETITION_SUITES = (
     "skills/design-competition/scripts/check-conformance.sh",
@@ -54,10 +56,22 @@ FORK_COMPILE = (
 )
 KNOWN_UNGATED = {
     "scripts/installed-autoreview.test.py":
-        "needs the pushed candidate's GitHub source archives; validate.yml's "
-        "installed-source job downloads them and runs it",
+        "needs source archives of a commit; fork-validate.yml's installed-source job "
+        "builds them from the candidate without its sanctioned symlinks and runs it "
+        "(validate.yml's job, which downloads GitHub's archives, is guarded to upstream)",
 }
 UPSTREAM_TEST_DIR = "skills/autoreview/tests"
+# The only symlinks the fork may track, with their exact targets. The fleet
+# instruction standard requires the first as a tracked symlink (never a copy);
+# the second exposes the diataxis skill to Claude Code. Upstream's
+# scripts/installed-autoreview.test.py requires a symlink-free tree for its
+# installed archives, so validate.yml's installed-source job is guarded to
+# upstream's repository and fork-validate.yml re-runs that test on a commit
+# with exactly these paths removed (--sanctioned-symlinks is its strip list).
+SANCTIONED_SYMLINKS = {
+    ".agents/rules/project.md": "../../AGENTS.md",
+    ".claude/skills/diataxis": "../../skills/diataxis",
+}
 TEST_FILE_PATTERNS = (
     "test_*.py", "*_test.py", "*.test.py", "*.test.mjs", "*.test.js", "*.test.ts", "*.test.sh",
 )
@@ -147,9 +161,96 @@ def executable_mode_errors(root: Path) -> list[str]:
     return errors
 
 
+def tracked_symlinks(root: Path) -> dict[str, str] | None:
+    """Tracked symlinks (git mode 120000) and their targets, read from the index.
+
+    Returns None when root is not a git checkout (a rehearsal tree, a fixture).
+    The index is used, not the filesystem, because a Windows checkout
+    materializes a symlink as a regular file.
+    """
+    if not (root / ".git").exists():
+        return None
+    git = shutil.which("git")
+    if git is None:
+        raise RuntimeError("git not found; cannot read tracked symlinks")
+    listing = subprocess.run([git, "ls-files", "-s", "-z"], cwd=root, capture_output=True, check=True).stdout
+    found = {}
+    for entry in listing.split(b"\0"):
+        if not entry:
+            continue
+        metadata, path = entry.split(b"\t", 1)
+        mode, oid, _stage = metadata.split()
+        if mode == b"120000":
+            target = subprocess.run([git, "cat-file", "blob", oid.decode("ascii")], cwd=root,
+                                    capture_output=True, check=True).stdout
+            found[path.decode("utf-8", "surrogateescape")] = target.decode("utf-8", "surrogateescape")
+    return found
+
+
+def worktree_symlinks(root: Path) -> dict[str, str]:
+    found = {}
+    for directory, subdirectories, files in os.walk(root):
+        kept = []
+        for name in sorted(subdirectories):
+            if name in SKIPPED_DIRECTORIES:
+                continue
+            path = Path(directory, name)
+            if path.is_symlink():
+                found[path.relative_to(root).as_posix()] = os.readlink(path)
+            else:
+                kept.append(name)
+        subdirectories[:] = kept
+        for name in sorted(files):
+            path = Path(directory, name)
+            if path.is_symlink():
+                found[path.relative_to(root).as_posix()] = os.readlink(path)
+    return found
+
+
+def symlink_errors(root: Path, tracked: dict[str, str] | None = None) -> list[str]:
+    """Only SANCTIONED_SYMLINKS may be symlinks, each with its exact target.
+
+    In a git checkout every sanctioned entry must also be present as a tracked
+    symlink: the fleet standard rejects a regular-file copy of the shim.
+    Outside one (no index to read), only what is found is checked.
+    """
+    require_all = True
+    if tracked is None:
+        try:
+            tracked = tracked_symlinks(root)
+        except (OSError, subprocess.CalledProcessError, RuntimeError, ValueError) as exc:
+            return [f"cannot read tracked symlinks: {exc}"]
+        if tracked is None:
+            require_all = False
+            tracked = worktree_symlinks(root)
+    errors = []
+    reason = ("upstream's scripts/installed-autoreview.test.py requires a symlink-free tree, and "
+              "fork-validate.yml strips only the sanctioned ones")
+    for path in sorted(tracked):
+        if path not in SANCTIONED_SYMLINKS:
+            errors.append(f"symlink is not in SANCTIONED_SYMLINKS: {path} -> {tracked[path]} ({reason})")
+        elif tracked[path] != SANCTIONED_SYMLINKS[path]:
+            errors.append(f"sanctioned symlink has the wrong target: {path} -> {tracked[path]} "
+                          f"(must be {SANCTIONED_SYMLINKS[path]})")
+    for path, target in sorted(SANCTIONED_SYMLINKS.items()):
+        resolved = os.path.normpath(os.path.join(os.path.dirname(path), target)).replace(os.sep, "/")
+        if resolved.startswith("../") or resolved == ".." or os.path.isabs(resolved):
+            errors.append(f"sanctioned symlink target leaves the repository: {path} -> {target}")
+        elif require_all and not checkout_path(root, resolved).exists():
+            errors.append(f"sanctioned symlink target does not exist: {path} -> {target}")
+        if require_all and path not in tracked:
+            errors.append(f"sanctioned path is not tracked as a symlink (mode 120000): {path} "
+                          "(the fleet instruction standard rejects a regular-file copy)")
+    return errors
+
+
+def on_windows() -> bool:
+    return os.name == "nt"
+
+
 def fork_gated_paths() -> set[str]:
     return {*FORK_PYTHON_SUITES, *FORK_SCRIPT_TESTS, *POSIX_SCRIPT_TESTS,
-            *FORK_NODE_TESTS, *DESIGN_COMPETITION_SUITES}
+            *POSIX_NODE_TESTS, *DESIGN_COMPETITION_SUITES}
 
 
 def manifest_errors(root: Path) -> list[str]:
@@ -238,7 +339,13 @@ def main(argv: list[str] | None = None, *, root: Path | None = None) -> int:
                         help="check only that every test file is gated")
     parser.add_argument("--tests-only", action="store_true",
                         help="run only the fork Python suites in the scrubbed fixture environment")
+    parser.add_argument("--sanctioned-symlinks", action="store_true",
+                        help="print the sanctioned symlink paths, one per line, and exit")
     args = parser.parse_args(argv)
+    if args.sanctioned_symlinks:
+        # Bytes with LF only: fork-validate.yml reads this list in bash on Windows too.
+        getattr(sys.stdout, "buffer", sys.stdout).write("".join(f"{path}\n" for path in sorted(SANCTIONED_SYMLINKS)).encode())
+        return 0
     root = repository_root() if root is None else root
     if args.tests_only:
         return run_tests_only(root)
@@ -256,6 +363,12 @@ def main(argv: list[str] | None = None, *, root: Path | None = None) -> int:
         print(f"executable modes: {error}", file=sys.stderr)
     if mode_errors:
         failed.append("executable modes")
+    print("+ symlinks: only the sanctioned symlinks are tracked", flush=True)
+    link_errors = symlink_errors(root)
+    for error in link_errors:
+        print(f"symlinks: {error}", file=sys.stderr)
+    if link_errors:
+        failed.append("symlinks")
     if args.manifest_only:
         return 1 if failed else 0
 
@@ -270,7 +383,11 @@ def main(argv: list[str] | None = None, *, root: Path | None = None) -> int:
     else:
         print("skip: " + ", ".join(POSIX_SCRIPT_TESTS) + " (bash gate; POSIX only)", flush=True)
     steps.append(("fork python suites", [python, *flags, "scripts/check-fork", "--tests-only"]))
-    steps.append(("node fork suites", ["node", "--test", *FORK_NODE_TESTS]))
+    if not on_windows():
+        steps.append(("node fork suites", ["node", "--test", *POSIX_NODE_TESTS]))
+    else:
+        print("skip: " + ", ".join(POSIX_NODE_TESTS) + " (its fake openclaw CLI is a shebang "
+              "script that Windows cannot execute; POSIX only)", flush=True)
     if args.skip_design_competition:
         print("skip: design-competition suites (--skip-design-competition)", flush=True)
     else:

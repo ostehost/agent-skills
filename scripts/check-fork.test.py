@@ -92,7 +92,7 @@ class CheckForkTest(unittest.TestCase):
             self.assertEqual(self.errors(root), [])
 
     def test_missing_listed_module_is_red(self) -> None:
-        for relative in (*HELPER["FORK_PYTHON_SUITES"], *HELPER["FORK_NODE_TESTS"],
+        for relative in (*HELPER["FORK_PYTHON_SUITES"], *HELPER["POSIX_NODE_TESTS"],
                          "scripts/run-checks.test.py"):
             with self.subTest(path=relative), self.checkout() as root:
                 root.joinpath(*relative.split("/")).unlink()
@@ -150,7 +150,8 @@ class CheckForkTest(unittest.TestCase):
     def commands(self, root: Path, args: list[str], *, which=None, status=0):
         with mock.patch("shutil.which", side_effect=which or (lambda name: name)), \
                 mock.patch("subprocess.run", return_value=subprocess.CompletedProcess([], status)) as run, \
-                mock.patch.dict(HELPER["main"].__globals__, {"manifest_errors": lambda root: []}), \
+                mock.patch.dict(HELPER["main"].__globals__, {"manifest_errors": lambda root: [],
+                                                             "symlink_errors": lambda root: []}), \
                 contextlib.redirect_stdout(io.StringIO()) as out, \
                 contextlib.redirect_stderr(io.StringIO()) as err:
             code = MAIN(args, root=root)
@@ -174,12 +175,29 @@ class CheckForkTest(unittest.TestCase):
         expected = [["scripts/check-fork.test.py"]]
         if os.name != "nt":
             expected.append(["scripts/run-checks.test.py"])
-        expected += [["scripts/check-fork", "--tests-only"],
-                     ["--test", "skills/beam/scripts/beam-handoff.test.mjs"],
-                     ["skills/design-competition/scripts/check-conformance.sh"],
+        expected.append(["scripts/check-fork", "--tests-only"])
+        if os.name != "nt":
+            expected.append(["--test", "skills/beam/scripts/beam-handoff.test.mjs"])
+        expected += [["skills/design-competition/scripts/check-conformance.sh"],
                      ["skills/design-competition/scripts/scripts.test.sh"]]
         self.assertEqual(tail, expected)
-        self.assertEqual([command[0] for command in commands[-3:]], ["node", "bash", "bash"])
+        self.assertEqual([command[0] for command in commands[-2:]], ["bash", "bash"])
+
+    def test_beam_handoff_suite_runs_on_posix_and_is_skipped_only_on_windows(self) -> None:
+        beam = ["node", "--test", "skills/beam/scripts/beam-handoff.test.mjs"]
+        with mock.patch.dict(HELPER["main"].__globals__, {"on_windows": lambda: False}):
+            code, commands, out, _ = self.commands(ROOT, [])
+        self.assertEqual(code, 0)
+        self.assertIn(beam, commands)
+        self.assertNotIn("beam-handoff.test.mjs (", out)
+        with mock.patch.dict(HELPER["main"].__globals__, {"on_windows": lambda: True}):
+            code, commands, out, _ = self.commands(ROOT, [])
+        self.assertEqual(code, 0)
+        self.assertNotIn("node", [command[0] for command in commands])
+        self.assertIn("skip: skills/beam/scripts/beam-handoff.test.mjs", out)
+        self.assertIn("Windows cannot execute", out)
+        # The skipped suite stays in the manifest, so it cannot become ungated unnoticed.
+        self.assertIn("skills/beam/scripts/beam-handoff.test.mjs", HELPER["fork_gated_paths"]())
 
     def test_skip_flag_drops_only_design_competition(self) -> None:
         _, full, _, _ = self.commands(ROOT, [])
@@ -221,6 +239,112 @@ class CheckForkTest(unittest.TestCase):
                 self.assertEqual(MAIN(["--manifest-only"], root=root), 1)
             run.assert_not_called()
             self.assertIn("test_unlisted.py", err.getvalue())
+
+    # --- sanctioned symlinks -------------------------------------------------
+
+    @contextlib.contextmanager
+    def git_checkout(self):
+        """A real git index holding exactly the sanctioned symlinks and their targets.
+
+        Symlinks are written straight into the index (update-index --cacheinfo),
+        so the fixture is the same on Windows, where a worktree cannot hold one.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "repo"
+            (root / "skills/diataxis").mkdir(parents=True)
+            (root / "AGENTS.md").write_text("# policy\n", encoding="utf-8")
+            (root / "skills/diataxis/SKILL.md").write_text("# skill\n", encoding="utf-8")
+            # Fixture isolation only: no host or system git configuration.
+            environment = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+            environment.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+
+            def git(*arguments: str, data: bytes | None = None) -> str:
+                result = subprocess.run(["git", *arguments], cwd=root, env=environment, input=data,
+                                        capture_output=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
+                return result.stdout.decode().strip()
+
+            def link(path: str, target: str) -> None:
+                oid = git("hash-object", "-w", "--stdin", data=target.encode())
+                git("update-index", "--add", "--cacheinfo", f"120000,{oid},{path}")
+
+            git("init", "-q")
+            git("add", "AGENTS.md", "skills/diataxis/SKILL.md")
+            for path, target in HELPER["SANCTIONED_SYMLINKS"].items():
+                link(path, target)
+            yield root, git, link
+
+    def test_checkout_tracks_exactly_the_sanctioned_symlinks(self) -> None:
+        self.assertEqual(HELPER["symlink_errors"](ROOT), [])
+        if (ROOT / ".git").exists():
+            self.assertEqual(HELPER["tracked_symlinks"](ROOT), HELPER["SANCTIONED_SYMLINKS"])
+
+    def test_git_fixture_with_only_sanctioned_symlinks_is_green(self) -> None:
+        with self.git_checkout() as (root, _git, _link):
+            self.assertEqual(HELPER["tracked_symlinks"](root), HELPER["SANCTIONED_SYMLINKS"])
+            self.assertEqual(HELPER["symlink_errors"](root), [])
+
+    def test_extra_tracked_symlink_is_red(self) -> None:
+        with self.git_checkout() as (root, _git, link):
+            link("docs/shortcut.md", "../AGENTS.md")
+            errors = HELPER["symlink_errors"](root)
+            self.assertEqual(len(errors), 1, errors)
+            self.assertIn("symlink is not in SANCTIONED_SYMLINKS: docs/shortcut.md -> ../AGENTS.md", errors[0])
+            self.assertIn("installed-autoreview.test.py", errors[0])
+
+    def test_sanctioned_symlink_with_wrong_target_is_red(self) -> None:
+        with self.git_checkout() as (root, _git, link):
+            link(".agents/rules/project.md", "../../README.md")
+            errors = HELPER["symlink_errors"](root)
+            self.assertEqual(len(errors), 1, errors)
+            self.assertIn("wrong target: .agents/rules/project.md -> ../../README.md", errors[0])
+            self.assertIn("must be ../../AGENTS.md", errors[0])
+
+    def test_shim_replaced_by_a_regular_file_copy_is_red(self) -> None:
+        with self.git_checkout() as (root, git, _link):
+            git("rm", "-q", "--cached", ".agents/rules/project.md")
+            shim = root / ".agents/rules/project.md"
+            shim.parent.mkdir(parents=True)
+            shutil.copyfile(root / "AGENTS.md", shim)
+            git("add", ".agents/rules/project.md")
+            self.assertIn("100644", git("ls-files", "-s", ".agents/rules/project.md"))
+            errors = HELPER["symlink_errors"](root)
+            self.assertEqual(len(errors), 1, errors)
+            self.assertIn("not tracked as a symlink (mode 120000): .agents/rules/project.md", errors[0])
+
+    def test_sanctioned_symlink_whose_target_is_gone_is_red(self) -> None:
+        with self.git_checkout() as (root, _git, _link):
+            (root / "AGENTS.md").unlink()
+            errors = HELPER["symlink_errors"](root)
+            self.assertEqual(len(errors), 1, errors)
+            self.assertIn("target does not exist: .agents/rules/project.md", errors[0])
+
+    def test_symlink_failure_fails_the_run_and_names_the_path(self) -> None:
+        with self.git_checkout() as (root, _git, link):
+            link("escape", "../outside")
+            with mock.patch.dict(HELPER["main"].__globals__, {"manifest_errors": lambda root: [],
+                                                              "executable_mode_errors": lambda root: []}), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(MAIN(["--manifest-only"], root=root), 1)
+            self.assertIn("symlinks: symlink is not in SANCTIONED_SYMLINKS: escape -> ../outside", err.getvalue())
+
+    @unittest.skipIf(os.name == "nt", "a Windows worktree cannot hold a symlink")
+    def test_tree_without_an_index_checks_the_symlinks_it_finds(self) -> None:
+        with self.checkout() as root:
+            self.assertEqual(HELPER["symlink_errors"](root), [])
+            (root / "stray").symlink_to("scripts")
+            errors = HELPER["symlink_errors"](root)
+            self.assertEqual(len(errors), 1, errors)
+            self.assertIn("symlink is not in SANCTIONED_SYMLINKS: stray -> scripts", errors[0])
+
+    def test_sanctioned_symlinks_flag_prints_the_strip_list_with_lf_only(self) -> None:
+        result = subprocess.run([sys.executable, str(SCRIPT), "--sanctioned-symlinks"],
+                                capture_output=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        expected = "".join(f"{path}\n" for path in sorted(HELPER["SANCTIONED_SYMLINKS"]))
+        self.assertEqual(result.stdout, expected.encode())
+        self.assertEqual(sorted(HELPER["SANCTIONED_SYMLINKS"]),
+                         [".agents/rules/project.md", ".claude/skills/diataxis"])
 
     def test_checkout_executable_modes_are_green(self) -> None:
         self.assertEqual(HELPER["executable_mode_errors"](ROOT), [])

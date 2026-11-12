@@ -115,7 +115,7 @@ describe a workaround as hook-legal — if it reaches a denied topology, say so.
 | Fork-only paths (`skills/design-competition/**`, `fork-tests/**`, `scripts/check-fork`, `scripts/run-checks`, `.github/workflows/fork-validate.yml`, `docs/UPSTREAM-SYNC.md`) | No conflict possible. New files at fork-only paths cost nothing at merge time — prefer adding one over editing a shared file. |
 | Upstream-only additions (e.g. `skills/beam`) | Take upstream wholesale. |
 | Inventory files (`README.md`, `skills.sh.json`, `AGENTS.md`) | Union, then reconcile by hand. `scripts/validate-skills` is the arbiter: it enforces that `skills.sh.json` references only existing skills, each in at most one grouping. |
-| `.github/workflows/validate.yml`, `scripts/check-skills`, `scripts/check-skills.test.py` | Take upstream's files. `check-skills` and its self-test stay byte-identical to upstream; `validate.yml` is upstream's plus one line, `if: github.repository == 'openclaw/agent-skills'` on `macos-sandbox`, because the fork has no `xcode-27` runner and a queued job would block `main`'s runs. Fork-only checks go in `scripts/check-fork` and `.github/workflows/fork-validate.yml`, never into these files. |
+| `.github/workflows/validate.yml`, `scripts/check-skills`, `scripts/check-skills.test.py` | Take upstream's files. `check-skills` and its self-test stay byte-identical to upstream; `validate.yml` is upstream's plus two lines, the same `if: github.repository == 'openclaw/agent-skills'` on two jobs. On `macos-sandbox`, because the fork has no `xcode-27` runner and a queued job would block `main`'s runs. On `installed-source`, because its test rejects the fork's two tracked symlinks (trap 6); `fork-validate.yml` runs that test instead. Fork-only checks go in `scripts/check-fork` and `.github/workflows/fork-validate.yml`, never into these files. |
 | Fork tests of shared skills | Keep them under `fork-tests/<skill>/`. Upstream's manifest self-test requires every `skills/autoreview/tests/test_*.py` to be in its `TEST_MODULES`, so a fork test there turns upstream's gate red. |
 | `skills/autoreview/scripts/autoreview` | Expect a competing rewrite; write the union by hand — see below. |
 
@@ -184,8 +184,26 @@ for new `resolve_command` / `SystemExit("... is required ...")` calls.
 `assertNotIn("clean", stdout)` began failing purely because the preflight now prints
 `trufflehog: clean (0.7s)`. Narrow the assertion; do not weaken it.
 
+**Trap 6 -- upstream gates that judge the whole tree.** Upstream's
+`scripts/installed-autoreview.test.py` lists every tracked entry and fails on any symlink,
+because it compares the tree with the archives an install downloads. The fleet instruction
+standard requires this fork to track `.agents/rules/project.md` as a symlink, never a copy,
+and `.claude/skills/diataxis` is a second one. The 2026-11 merge was green locally and red in
+CI on exactly this. Do not remove the symlinks and do not edit upstream's test. The fork
+reconciles the two rules this way: `validate.yml`'s `installed-source` job is guarded to
+upstream's repository, and `fork-validate.yml` runs the same test, unchanged, against
+archives of an ephemeral commit that removes only the symlinks listed by
+`scripts/check-fork --sanctioned-symlinks`. One gap remains: upstream's job downloads
+GitHub's own tarball and zipball, and the fork's job runs `git archive` on a commit GitHub
+never sees, so the fork proves the installed files but not GitHub's archive generation.
+`scripts/run-checks` cannot run that test, since
+it needs archives of a commit, so the local guard is `check-fork`'s symlink step: it fails on
+any tracked symlink outside that list, on a wrong target, and on a listed path that is no
+longer a symlink.
+
 Traps 1a, 1b, 2 and 3 are reported by `scripts/upstream-survey`. Traps 4 and 5 surface only
-when the gated suite runs, which is why step 2 comes before step 4.
+when the gated suite runs, which is why step 2 comes before step 4. Trap 6 surfaces only in
+CI, on the pushed commit.
 
 ## `skills/autoreview/scripts/autoreview` — expect a competing rewrite
 
@@ -277,7 +295,9 @@ temporary roots, so a run under one fails about 134 tests for environment reason
 
 **Gate split.** `scripts/run-checks` runs upstream's `scripts/check-skills` (CI:
 `validate.yml`), then the fork's `scripts/check-fork` (CI: `fork-validate.yml`, an
-`ubuntu-latest` leg and a `windows-latest` leg with `--skip-design-competition`). There is
+`ubuntu-latest` leg and a `windows-latest` leg with `--skip-design-competition`, plus the
+installed-source job from trap 6). On Windows `check-fork` also skips upstream's
+`beam-handoff.test.mjs`, whose fake `openclaw` CLI is a shebang script Windows cannot run. There is
 no hand-kept mirror to update: `check-fork` derives what `check-skills` covers from its
 `TEST_MODULES` and command list, and its manifest fails when a test file is run by neither
 gate. `check-fork` also fails when a non-test script with a shebang has lost its executable

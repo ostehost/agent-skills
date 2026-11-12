@@ -266,10 +266,14 @@ controls without a reviewer account or provider request.
 `scripts/check-skills` is upstream's shared gate. `scripts/check-fork` runs this
 fork's own checks: the tests under `fork-tests/`, the `diataxis` audit tests,
 `beam-handoff.test.mjs`, the `design-competition` script suites, a manifest
-that fails when neither gate runs a test file, and a check that every non-test
-script with a shebang keeps its executable bit. The script suites need bash and
-`jq`, so the Windows leg of `.github/workflows/fork-validate.yml` runs `python
-scripts/check-fork --skip-design-competition`.
+that fails when neither gate runs a test file, a check that every non-test
+script with a shebang keeps its executable bit, and a check that the only
+tracked symlinks are `.agents/rules/project.md` and `.claude/skills/diataxis`.
+The script suites need bash and `jq`, so the Windows leg of
+`.github/workflows/fork-validate.yml` runs `python scripts/check-fork
+--skip-design-competition`; that leg also skips `beam-handoff.test.mjs`, whose
+fake CLI Windows cannot run. The same workflow runs upstream's installed-source
+test on a copy of the commit without those two symlinks.
 
 `scripts/run-checks` runs `check-skills` and then `check-fork`. It refuses to
 start when `TMPDIR` points into a shared scratch directory, or when the

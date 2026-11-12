@@ -1,7 +1,8 @@
 name: fork-validate
 
 # Fork-only suites that upstream's validate.yml (scripts/check-skills) does not
-# own. Kept in its own file so validate.yml stays upstream's plus one line.
+# own. Kept in its own file so validate.yml stays upstream's plus two lines:
+# the repository guards on macos-sandbox and installed-source.
 
 on:
   pull_request:
@@ -47,3 +48,77 @@ jobs:
         run: python -m pip install -r requirements-dev.txt
       - name: Check fork suites
         run: python scripts/check-fork ${{ matrix.args }}
+
+  # validate.yml's installed-source job is guarded to upstream's repository:
+  # its test requires a symlink-free tree, and the fork must track two symlinks
+  # (scripts/check-fork SANCTIONED_SYMLINKS; the fleet instruction standard
+  # forbids replacing the shim with a copy). The shims are agent wiring, not
+  # installed payload, so this job runs upstream's test unchanged against
+  # archives of an ephemeral commit that removes only those symlinks. That
+  # proves what upstream's job proves for everything an install receives, with
+  # one gap: upstream downloads GitHub's own tarball and zipball, while this
+  # job runs `git archive` on a commit GitHub never sees. So it proves the
+  # installed files, not GitHub's archive generation.
+  installed-source:
+    name: installed source, sanctioned symlinks stripped (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: '3.10'
+          - os: ubuntu-latest
+            python: '3.11.18'
+          - os: windows-latest
+            python: '3.14'
+    env:
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      # Archive identity must use the candidate head, not the PR merge commit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Prepare archives of the candidate without its sanctioned symlinks
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          # One source for the strip list: check-fork's allowlist.
+          links=()
+          while IFS= read -r link; do links+=("$link"); done \
+            < <(python scripts/check-fork --sanctioned-symlinks | tr -d '\r')
+          test "${#links[@]}" -gt 0
+          git rm --quiet --cached -- "${links[@]}"
+          # Only the sanctioned symlinks may have been staged for removal.
+          test "$(git diff --cached --name-only | sort)" = "$(printf '%s\n' "${links[@]}" | sort)"
+          git -c user.name=fork-validate -c user.email=fork-validate@example.invalid \
+            commit --quiet -m "ci: ephemeral candidate without sanctioned symlinks"
+          archives="$RUNNER_TEMP/installed-source-archives"
+          mkdir "$archives"
+          # Exact blob bytes on every runner: no line-ending conversion.
+          git -c core.autocrlf=false -c core.eol=lf archive --format=tar.gz --prefix=source/ \
+            --output "$archives/source.tar.gz" HEAD
+          git -c core.autocrlf=false -c core.eol=lf archive --format=zip --prefix=source/ \
+            --output "$archives/source.zip" HEAD
+          python -m venv "$RUNNER_TEMP/installed-source-python"
+          proof_python="$RUNNER_TEMP/installed-source-python/bin/python"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            proof_python="$RUNNER_TEMP/installed-source-python/Scripts/python.exe"
+          fi
+          echo "PROOF_PYTHON=$proof_python" >> "$GITHUB_ENV"
+          echo "PROOF_ARCHIVES=$archives" >> "$GITHUB_ENV"
+      - name: Qualify installed helper without optional dependencies
+        shell: bash
+        run: '"$PROOF_PYTHON" -B scripts/installed-autoreview.test.py --archives "$PROOF_ARCHIVES" --extras absent'
+      - name: Install pinned optional proof dependencies
+        shell: bash
+        run: '"$PROOF_PYTHON" -m pip install --only-binary=:all: Pillow==12.3.0 tomli==2.5.0'
+      - name: Qualify real installed image decoder and TOML parser
+        shell: bash
+        run: '"$PROOF_PYTHON" -B scripts/installed-autoreview.test.py --archives "$PROOF_ARCHIVES" --extras present'
