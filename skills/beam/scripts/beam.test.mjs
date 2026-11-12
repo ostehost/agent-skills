@@ -3,8 +3,8 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
-import test from "node:test";
+import { execFileSync, spawn } from "node:child_process";
+import test, { after } from "node:test";
 import {
   renderSession,
   resolveClaudeSession,
@@ -13,9 +13,16 @@ import {
 } from "./beam-session.js";
 
 const script = path.resolve("skills/beam/scripts/beam");
+const tempDirs = [];
+
+after(() => {
+  for (const dir of tempDirs) fs.rmSync(dir, { recursive: true, force: true });
+});
 
 function tempDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "beam-test-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "beam-test-"));
+  tempDirs.push(dir);
+  return dir;
 }
 
 function writeJsonl(file, rows) {
@@ -26,7 +33,8 @@ function run(args, options = {}) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [script, ...args], {
       cwd: path.resolve("."),
-      env: { ...process.env, ...options.env },
+      // Handoff is the publish default; never let a test retire a real source.
+      env: { ...process.env, BEAM_ACCESS_TOKEN: "", BEAM_AUTH_TOKEN: "", BEAM_STATE: path.join(tempDir(), "handoffs.sqlite"), ...options.env },
       stdio: ["pipe", "pipe", "pipe"],
     });
     let stdout = "";
@@ -43,7 +51,7 @@ function run(args, options = {}) {
   });
 }
 
-async function beamReceiverEndpoint(t, urlForPayload, basePath = "") {
+async function beamReceiverEndpoint(t, urlForPayload, basePath = "", receiptFields = {}) {
   const server = http.createServer((request, response) => {
     let body = "";
     request.setEncoding("utf8");
@@ -56,7 +64,12 @@ async function beamReceiverEndpoint(t, urlForPayload, basePath = "") {
         "content-type": "application/json",
         connection: "close",
       });
-      response.end(JSON.stringify({ ok: true, url: urlForPayload(payload, request) }));
+      response.end(JSON.stringify({
+        ok: true,
+        beamId: payload.beamId,
+        url: urlForPayload(payload, request),
+        ...receiptFields,
+      }));
     });
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -223,6 +236,89 @@ test("standalone discovery fails closed when the file scan is incomplete", () =>
     () => resolveClaudeSession(id, { CLAUDE_CONFIG_DIR: configDir }, { maxFiles: 1 }),
     /discovery exceeded its file limit/,
   );
+});
+
+test("Claude discovery accepts the exact cap with trailing non-session entries", () => {
+  const configDir = tempDir();
+  const projectDir = path.join(configDir, "projects", "demo");
+  fs.mkdirSync(projectDir, { recursive: true });
+  const id = "exact-cap-session";
+  const session = path.join(projectDir, `${id}.jsonl`);
+  writeJsonl(session, [{ type: "user", sessionId: id, message: { content: "Exact cap" } }]);
+  fs.writeFileSync(path.join(projectDir, "z-notes.txt"), "not a session");
+  fs.mkdirSync(path.join(projectDir, "zz-empty"));
+  assert.equal(
+    resolveClaudeSession(id, { CLAUDE_CONFIG_DIR: configDir }, { maxFiles: 1 }).file,
+    fs.realpathSync(session),
+  );
+});
+
+test("Codex discovery shares an exact cap across active and empty archive roots", () => {
+  const codexHome = tempDir();
+  const active = path.join(codexHome, "sessions");
+  const archived = path.join(codexHome, "archived_sessions");
+  fs.mkdirSync(active);
+  fs.mkdirSync(archived);
+  const id = "exact-cap-session";
+  const session = path.join(active, `rollout-${id}.jsonl`);
+  writeJsonl(session, [{ type: "session_meta", payload: { id } }]);
+  assert.equal(
+    resolveCodexSession(id, { CODEX_HOME: codexHome }, { maxFiles: 1 }).file,
+    fs.realpathSync(session),
+  );
+  writeJsonl(path.join(archived, "other.jsonl"), []);
+  assert.throws(
+    () => resolveCodexSession(id, { CODEX_HOME: codexHome }, { maxFiles: 1 }),
+    /discovery exceeded its file limit/,
+  );
+});
+
+test("session rendering and metadata discovery retry short reads", (t) => {
+  const codexHome = tempDir();
+  fs.mkdirSync(path.join(codexHome, "sessions"));
+  const id = "short-read-session";
+  const session = path.join(codexHome, "sessions", `rollout-${id}.jsonl`);
+  writeJsonl(session, [
+    { type: "session_meta", payload: { id } },
+    { type: "event_msg", payload: { type: "user_message", message: "Complete message" } },
+  ]);
+  const read = fs.readSync;
+  t.mock.method(fs, "readSync", (fd, buffer, offset, length, position) =>
+    read(fd, buffer, offset, Math.min(length, 13), position));
+  assert.equal(resolveCodexSession(id, { CODEX_HOME: codexHome }).file, fs.realpathSync(session));
+  assert.deepEqual(renderSession(session, { source: "codex" }).items, [
+    { type: "userMessage", text: "Complete message" },
+  ]);
+});
+
+test("bounded session reads retain head and tail messages after short reads", (t) => {
+  const session = path.join(tempDir(), "session.jsonl");
+  const row = (message) => JSON.stringify({ type: "event_msg", payload: { type: "user_message", message } });
+  fs.writeFileSync(session, `${row("Head message")}\n${"x".repeat(8 * 1024 * 1024)}\n${row("Tail message")}\n`);
+  const read = fs.readSync;
+  t.mock.method(fs, "readSync", (fd, buffer, offset, length, position) =>
+    read(fd, buffer, offset, Math.min(length, 4096), position));
+  const rendered = renderSession(session, { source: "codex" });
+  assert.equal(rendered.truncated, true);
+  assert.deepEqual(rendered.items, [
+    { type: "userMessage", text: "Head message" },
+    { type: "userMessage", text: "Tail message" },
+  ]);
+});
+
+test("rendering and metadata discovery reject unexpected EOF", (t) => {
+  const codexHome = tempDir();
+  fs.mkdirSync(path.join(codexHome, "sessions"));
+  const id = "early-eof-session";
+  const session = path.join(codexHome, "sessions", `rollout-${id}.jsonl`);
+  writeJsonl(session, [{ type: "session_meta", payload: { id } }]);
+  const read = fs.readSync;
+  let calls = 0;
+  t.mock.method(fs, "readSync", (fd, buffer, offset, length, position) =>
+    calls++ === 0 ? read(fd, buffer, offset, Math.min(length, 13), position) : 0);
+  assert.throws(() => renderSession(session, { source: "codex" }), /ended before the expected read/);
+  calls = 0;
+  assert.throws(() => resolveCodexSession(id, { CODEX_HOME: codexHome }), /ended before the expected read/);
 });
 
 test("standalone Codex discovery verifies metadata across active and archived rollouts", () => {
@@ -429,6 +525,7 @@ test("publish dry-run emits a sanitized versioned payload", async () => {
   const session = claudeSession();
   const result = await run([
     "publish",
+    "--snapshot",
     "--endpoint",
     "http://127.0.0.1:9/api/v1/beam/sessions",
     "--session",
@@ -459,6 +556,7 @@ test("publish bounds transcript item count for the receiver schema", async () =>
   );
   const result = await run([
     "publish",
+    "--snapshot",
     "--endpoint",
     "http://127.0.0.1:9/api/v1/beam/sessions",
     "--session",
@@ -482,6 +580,7 @@ test("publish honors the total max-chars disclosure limit", async () => {
   ]);
   const result = await run([
     "publish",
+    "--snapshot",
     "--endpoint",
     "http://127.0.0.1:9/api/v1/beam/sessions",
     "--session",
@@ -509,6 +608,7 @@ test("publish keeps multibyte transcript items within receiver limits", async ()
   ]);
   const result = await run([
     "publish",
+    "--snapshot",
     "--endpoint",
     "http://127.0.0.1:9/api/v1/beam/sessions",
     "--session",
@@ -530,6 +630,7 @@ test("publish keeps multibyte transcript items within receiver limits", async ()
 test("publish rejects an entry limit above the receiver maximum", async () => {
   const result = await run([
     "publish",
+    "--snapshot",
     "--endpoint",
     "http://127.0.0.1:9/api/v1/beam/sessions",
     "--session",
@@ -549,6 +650,7 @@ test("publish accepts IPv6 loopback development endpoints", async () => {
   const session = claudeSession();
   const result = await run([
     "publish",
+    "--snapshot",
     "--endpoint",
     "http://[::1]:9/api/v1/beam/sessions",
     "--session",
@@ -573,6 +675,7 @@ test("publish fails closed when an explicit session id has no exact transcript",
   const result = await run(
     [
       "publish",
+      "--snapshot",
       "--endpoint",
       "http://127.0.0.1:9/api/v1/beam/sessions",
       "--session-id",
@@ -602,6 +705,7 @@ test("publish keeps display titles out of exact session discovery", async () => 
   const result = await run(
     [
       "publish",
+      "--snapshot",
       "--endpoint",
       "http://127.0.0.1:9/api/v1/beam/sessions",
       "--session-id",
@@ -635,6 +739,7 @@ test("publish refuses fuzzy newest-session fallback when no identity is availabl
   const result = await run(
     [
       "publish",
+      "--snapshot",
       "--endpoint",
       "http://127.0.0.1:9/api/v1/beam/sessions",
       "--cwd",
@@ -659,6 +764,7 @@ test("publish refuses fuzzy newest-session fallback when no identity is availabl
 test("publish rejects a missing explicit session path instead of discovering another session", async () => {
   const result = await run([
     "publish",
+    "--snapshot",
     "--endpoint",
     "http://127.0.0.1:9/api/v1/beam/sessions",
     "--session",
@@ -920,6 +1026,7 @@ test(
     const result = await run(
       [
         "publish",
+        "--snapshot",
         "--endpoint",
         "https://beam.invalid/api/v1/beam/sessions",
         "--session",
@@ -995,7 +1102,7 @@ test("publish sends Cloudflare Access auth and normalized session JSON", async (
   const endpoint = `http://127.0.0.1:${address.port}/api/v1/beam/sessions`;
 
   const result = await run(
-    ["publish", "--endpoint", endpoint, "--session", session],
+    ["publish", "--snapshot", "--endpoint", endpoint, "--session", session],
     { env: { BEAM_ACCESS_TOKEN: "test-access-token" } },
   );
 
@@ -1009,6 +1116,108 @@ test("publish sends Cloudflare Access auth and normalized session JSON", async (
   assert.equal(payload.version, 1);
   assert.equal(payload.title, "Fix the upload flow at [LOCAL_PATH] with [REDACTED_AUTH_HEADER]");
   assert.equal(payload.completed, false);
+});
+
+test("publish distinguishes upload-only receipts while preserving older and staff output", async (t) => {
+  const session = claudeSession();
+  const receipt = {};
+  const requests = [];
+  const endpoint = await beamReceiverEndpoint(t, (payload, request) => {
+    requests.push(payload);
+    assert.equal(request.method, "POST");
+    assert.equal(request.headers["cf-access-token"], "synthetic-personal-access");
+    assert.equal(request.headers.authorization, undefined);
+    return `/team/beam/upload-flow-${payload.beamId.slice(0, 12)}`;
+  }, "/team", receipt);
+
+  for (const canView of [undefined, true, false]) {
+    if (canView === undefined) delete receipt.canView;
+    else receipt.canView = canView;
+    const result = await run(["publish", "--snapshot", "--endpoint", endpoint, "--session", session], {
+      env: { BEAM_ACCESS_TOKEN: "synthetic-personal-access" },
+    });
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.stderr, "");
+    const target = endpoint.replace(/\/api\/v1\/beam\/sessions$/,
+      `/beam/upload-flow-${requests.at(-1).beamId.slice(0, 12)}`);
+    assert.equal(result.stdout, canView === false
+      ? `Beam upload succeeded: ${target}\nThis link is for authorized Team operators; upload-only access does not let you open it.\nSnapshot is read-only. To continue in Team, rerun beam publish without --snapshot (or beam handoff) with the same endpoint and source selector.\n`
+      : `Beamed session: ${target}\nSnapshot is read-only. To continue in Team, rerun beam publish without --snapshot (or beam handoff) with the same endpoint and source selector.\n`);
+    assert.equal(requests.at(-1).version, 1);
+    assert.equal(Object.hasOwn(requests.at(-1), "canView"), false);
+    assert.doesNotMatch(JSON.stringify(requests.at(-1)), /abcdefghijklmnopqrstuvwxyz123456|hidden compact summary|synthetic-personal-access/);
+  }
+  assert.equal(requests.length, 3);
+  assert.equal(new Set(requests.map(({ beamId }) => beamId)).size, 1);
+});
+
+test("upload-only success stays quiet for publish and lifecycle hooks", async (t) => {
+  const session = claudeSession();
+  let requests = 0;
+  const endpoint = await beamReceiverEndpoint(t, ({ beamId }) => {
+    requests++;
+    return `/beam/${beamId.slice(0, 12)}`;
+  }, "", { canView: false });
+
+  for (const command of ["publish", "hook"]) {
+    const result = await run([command, ...(command === "publish" ? ["--snapshot"] : []), "--endpoint", endpoint, "--quiet",
+      ...(command === "publish" ? ["--session", session] : [])], {
+      stdin: command === "hook"
+        ? JSON.stringify({ transcript_path: session, hook_event_name: "Stop" })
+        : undefined,
+    });
+    assert.deepEqual(result, { code: 0, stdout: "", stderr: "" });
+  }
+  assert.equal(requests, 2);
+});
+
+test("publish rejects malformed provided canView without retry or success output", async (t) => {
+  const session = claudeSession();
+  const receipt = {};
+  let requests = 0;
+  const endpoint = await beamReceiverEndpoint(t, ({ beamId }) => {
+    requests++;
+    return `/beam/${beamId.slice(0, 12)}`;
+  }, "", receipt);
+
+  const malformed = [null, "false", "true", 0, 1, {}, [], [false]];
+  for (const canView of malformed) {
+    receipt.canView = canView;
+    const result = await run(["publish", "--snapshot", "--endpoint", endpoint, "--session", session]);
+    assert.equal(result.code, 1, JSON.stringify(canView));
+    assert.equal(result.stdout, "");
+    assert.match(result.stderr, /invalid canView receipt field/);
+  }
+  assert.equal(requests, malformed.length);
+});
+
+test("upload-only receipts still require safe origin, base path, and exact session ID", async (t) => {
+  const session = claudeSession();
+  let makeUrl;
+  let requests = 0;
+  const endpoint = await beamReceiverEndpoint(t, (payload) => {
+    requests++;
+    return makeUrl(payload);
+  }, "/team", { canView: false });
+  const cases = [
+    [true, ({ beamId }) => `/team/chat/main?catalog=beam&host=gateway&thread=${beamId}`],
+    [false, ({ beamId }) => `https://example.test/team/beam/${beamId.slice(0, 12)}`],
+    [false, ({ beamId }) => `/beam/${beamId.slice(0, 12)}`],
+    [false, ({ beamId }) => `/team/beam/${beamId[0] === "0" ? "1" : "0"}${beamId.slice(1, 12)}`],
+    [false, () => "/team/chat/main?catalog=beam&host=gateway&thread=other"],
+    [false, ({ beamId }) => `/team/beam/${beamId.slice(0, 12)}\n`],
+  ];
+  for (const [accepted, urlForPayload] of cases) {
+    makeUrl = urlForPayload;
+    const result = await run(["publish", "--snapshot", "--endpoint", endpoint, "--session", session]);
+    assert.equal(result.code, accepted ? 0 : 1, result.stderr);
+    if (accepted) assert.match(result.stdout, /authorized Team operators/);
+    else {
+      assert.equal(result.stdout, "");
+      assert.match(result.stderr, /unsafe session URL/);
+    }
+  }
+  assert.equal(requests, cases.length);
 });
 
 test("publish refuses redirects without forwarding the Access token or payload", async (t) => {
@@ -1036,6 +1245,7 @@ test("publish refuses redirects without forwarding the Access token or payload",
   const result = await run(
     [
       "publish",
+      "--snapshot",
       "--endpoint",
       `http://127.0.0.1:${sourceAddress.port}/api/v1/beam/sessions`,
       "--session",
@@ -1067,6 +1277,7 @@ test("publish ignores unvalidated legacy sessionUrl response fields", async (t) 
 
   const result = await run([
     "publish",
+    "--snapshot",
     "--endpoint",
     `http://127.0.0.1:${address.port}/api/v1/beam/sessions`,
     "--session",
@@ -1091,7 +1302,7 @@ test("publish rejects receiver URLs containing reflected credentials", async (t)
   const address = server.address();
 
   const result = await run(
-    ["publish", "--endpoint", `http://127.0.0.1:${address.port}/api/v1/beam/sessions`, "--session", session],
+    ["publish", "--snapshot", "--endpoint", `http://127.0.0.1:${address.port}/api/v1/beam/sessions`, "--session", session],
     { env: { BEAM_ACCESS_TOKEN: "test-access-token" } },
   );
 
@@ -1122,6 +1333,7 @@ test("publish accepts bare and named Beam URLs below the endpoint-derived base p
     makePath = pathFactory;
     const result = await run([
       "publish",
+      "--snapshot",
       "--endpoint",
       endpoint,
       "--session",
@@ -1144,6 +1356,7 @@ test("publish accepts the current canonical catalog URL during rollout", async (
   );
   const result = await run([
     "publish",
+    "--snapshot",
     "--endpoint",
     endpoint,
     "--session",
@@ -1209,6 +1422,7 @@ test("publish rejects malformed pretty Beam URLs", async (t) => {
     makeUrl = urlFactory;
     const result = await run([
       "publish",
+      "--snapshot",
       "--endpoint",
       endpoint,
       "--session",
@@ -1262,6 +1476,7 @@ test("publish rejects malformed rollout catalog URLs", async (t) => {
     makeUrl = urlFactory;
     const result = await run([
       "publish",
+      "--snapshot",
       "--endpoint",
       endpoint,
       "--session",
@@ -1274,8 +1489,11 @@ test("publish rejects malformed rollout catalog URLs", async (t) => {
 
 test("publish never prints access tokens on receiver errors", async (t) => {
   const session = claudeSession();
+  let status;
+  let requests = 0;
   const server = http.createServer((_request, response) => {
-    response.writeHead(401, { "content-type": "application/json" });
+    requests++;
+    response.writeHead(status, { "content-type": "application/json" });
     const escape = String.fromCharCode(27);
     response.end(
       JSON.stringify({
@@ -1288,14 +1506,117 @@ test("publish never prints access tokens on receiver errors", async (t) => {
   t.after(() => server.close());
   const address = server.address();
 
-  const result = await run(
-    ["publish", "--endpoint", `http://127.0.0.1:${address.port}/api/v1/beam/sessions`, "--session", session],
-    { env: { BEAM_ACCESS_TOKEN: "super-secret-access-token" } },
-  );
+  for (status of [401, 403]) {
+    const result = await run(
+      ["publish", "--snapshot", "--endpoint", `http://127.0.0.1:${address.port}/api/v1/beam/sessions`, "--session", session],
+      { env: { BEAM_ACCESS_TOKEN: "super-secret-access-token" } },
+    );
 
+    assert.equal(result.code, 1);
+    assert.equal(result.stdout, "");
+    assert.match(result.stderr, new RegExp(`Beam upload failed: HTTP ${status}`));
+    assert.equal(result.stderr.includes(String.fromCharCode(27)), false);
+    assert.doesNotMatch(result.stderr, /\nforged/);
+    assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /super-secret-access-token/);
+  }
+  assert.equal(requests, 2);
+});
+
+test("CLI loads its native module format without loader warnings", async () => {
+  const result = await run(["--help"], {
+    env: { NODE_OPTIONS: "", NODE_NO_WARNINGS: "" },
+  });
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /Usage:/);
+  assert.equal(result.stderr, "");
+});
+
+test("copied Beam runs inside a CommonJS project without dependencies", () => {
+  const root = tempDir();
+  fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ type: "commonjs" }));
+  const installed = path.join(root, "installed-beam");
+  fs.cpSync(path.dirname(path.dirname(script)), installed, { recursive: true });
+  const output = execFileSync(process.execPath, [path.join(installed, "scripts", "beam"), "--help"], {
+    cwd: root, encoding: "utf8", stdio: "pipe",
+    env: { ...process.env, NODE_OPTIONS: "", NODE_NO_WARNINGS: "" },
+  });
+  assert.match(output, /Usage:/);
+});
+
+
+test("source model metadata follows the native conversation without exporting account settings", () => {
+  const dir = tempDir();
+  const file = path.join(dir, "model-session.jsonl");
+  writeJsonl(file, [
+    { type: "session_meta", payload: { id: "model-thread", model_provider: "openai", settings: { token: "not-exported" } } },
+    { type: "turn_context", payload: { model: "gpt-6.1-sol" } },
+    { type: "event_msg", payload: { type: "user_message", message: "Continue the task" } },
+  ]);
+  assert.deepEqual(renderSession(file, { source: "codex" }).sourceModel, { provider: "openai", model: "gpt-6.1-sol" });
+  writeJsonl(file, [
+    { type: "assistant", sessionId: "model-session", message: { role: "assistant", model: "claude-opus-4-6", content: "Result" } },
+  ]);
+  assert.deepEqual(renderSession(file, { source: "claude" }).sourceModel, { provider: "anthropic", model: "claude-opus-4-6" });
+});
+
+test("publish hands off by default and retires the source in local state", async (t) => {
+  const session = claudeSession();
+  const state = path.join(tempDir(), "handoffs.sqlite");
+  const generation = "b".repeat(32);
+  const endpoint = await beamReceiverEndpoint(t, (payload) => `/beam/${payload.beamId.slice(0, 12)}`, "", {
+    handoff: { id: generation, owner: "gateway", access: "owned" },
+  });
+  const result = await run(["publish", "--endpoint", endpoint, "--session", session], { env: { BEAM_STATE: state } });
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /^Conversation handed to Team: /m);
+  assert.doesNotMatch(result.stdout, /Snapshot is read-only/);
+  const again = await run(["publish", "--endpoint", endpoint, "--session", session], { env: { BEAM_STATE: state } });
+  assert.equal(again.code, 0, again.stderr);
+  assert.match(again.stdout, /^Conversation handed to Team: /m);
+});
+
+test("publish --complete requires --snapshot", async () => {
+  const result = await run(["publish", "--endpoint", "https://beam.invalid/api/v1/beam/sessions", "--session", claudeSession(), "--complete"]);
   assert.equal(result.code, 1);
-  assert.match(result.stderr, /Beam upload failed: HTTP 401/);
-  assert.equal(result.stderr.includes(String.fromCharCode(27)), false);
-  assert.doesNotMatch(result.stderr, /\nforged/);
-  assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /super-secret-access-token/);
+  assert.match(result.stderr, /--complete applies to --snapshot publishing/);
+});
+
+test("sanitizer keeps calendar dates but still redacts phone numbers", () => {
+  assert.equal(sanitizeVisibleText("ClawCon 2026.12.06, Claw Cafe 2026-12-04 and 06/12/2026"), "ClawCon 2026.12.06, Claw Cafe 2026-12-04 and 06/12/2026");
+  assert.equal(sanitizeVisibleText("call +1 415 555 0134 or 0412 345 678"), "call +[REDACTED_PHONE] or [REDACTED_PHONE]");
+});
+
+test("images and delivered files become visible asset placeholders without bytes or paths", () => {
+  const dir = tempDir();
+  const video = path.join(dir, "launch-reel.mp4");
+  fs.writeFileSync(video, Buffer.alloc(3 * 1024 * 1024));
+  const session = path.join(dir, "22222222-2222-4333-8444-555555555555.jsonl");
+  const pixels = Buffer.alloc(30 * 1024).toString("base64");
+  writeJsonl(session, [
+    { type: "user", sessionId: "22222222-2222-4333-8444-555555555555", message: { role: "user", content: [
+      { type: "image", source: { type: "base64", media_type: "image/webp", data: pixels } },
+      { type: "text", text: "[Image: source: /private/tmp/session/images/1.webp]\nmake it loop" },
+    ] } },
+    { type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "SendUserFile", input: { files: [video] } }] } },
+    { type: "assistant", message: { role: "assistant", content: "Done." } },
+  ]);
+  const rendered = renderSession(session, { source: "claude" });
+  const text = rendered.items.map((item) => item.text).join("\n");
+  assert.match(text, /\[Beam asset omitted: image \(image\/webp, 30 KB\)\]/);
+  assert.match(text, /\[Beam asset omitted: image\]\nmake it loop/);
+  assert.match(text, /\[Beam asset omitted: file launch-reel\.mp4 \(3\.0 MB\)\]/);
+  assert.doesNotMatch(text, new RegExp(dir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.ok(!text.includes(pixels.slice(0, 64)));
+});
+
+test("default publish falls back to a snapshot on receivers without handoff support", async (t) => {
+  const session = claudeSession();
+  const state = path.join(tempDir(), "handoffs.sqlite");
+  const endpoint = await beamReceiverEndpoint(t, (payload) => `/beam/${payload.beamId.slice(0, 12)}`);
+  const result = await run(["publish", "--endpoint", endpoint, "--session", session], { env: { BEAM_STATE: state } });
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /^Beamed session: /m);
+  assert.match(result.stderr, /does not support handoff/);
+  const again = await run(["publish", "--snapshot", "--endpoint", endpoint, "--session", session], { env: { BEAM_STATE: state } });
+  assert.equal(again.code, 0, again.stderr);
 });

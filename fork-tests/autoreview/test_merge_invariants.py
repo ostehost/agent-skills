@@ -4,15 +4,26 @@
 Upstream now captures bundles and evidence losslessly in structured records, so the
 old truncation-producer checks no longer apply. The receipt and binding functions remain
 fork-only and can still disappear silently if a future sync replaces the helper wholesale.
+
+Fork-only: this lives under fork-tests/ because upstream's manifest self-test requires
+every skills/autoreview/tests/test_*.py to be listed in its TEST_MODULES.
 """
 from __future__ import annotations
 
+import os
 import runpy
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "autoreview"
+ROOT = Path(__file__).resolve().parents[2]
+SCRIPT = ROOT / "skills" / "autoreview" / "scripts" / "autoreview"
+FORK_TEST_NAMES = ("test_receipt_contract.py", "test_merge_invariants.py")
+MANIFEST_TEST = "CheckSkillsTest.test_manifest_covers_checkout_test_files_in_their_groups"
 
 
 def load_helper() -> dict[str, object]:
@@ -43,6 +54,12 @@ FORK_ONLY_FUNCTIONS = (
     "parse_binding_pairs",
     "resolve_commit_sha",
     "review_target_binding",
+    # 2026-11 sync (upstream 1f71b29): typed failure mapping (interrupted,
+    # invalid_report), the base-ref movement check that replaced rewriting
+    # target_ref to a SHA, and the receipt boundary split out of main_with_args.
+    "classify_receipt_exception",
+    "require_base_ref_unmoved",
+    "run_selected_review",
     # 2026-08-20: "bounded parallel test execution" (signal_parallel_test_group)
     # was deliberately dropped when the fork yielded --parallel-tests to
     # upstream's removal. It is gone on purpose, not lost to a resolution.
@@ -64,6 +81,10 @@ class ForkOnlyFunctionsSurvive(unittest.TestCase):
             f"fork-only function(s) {missing} vanished. These do not exist upstream, so "
             f"a wholesale file replacement removes them without a conflict marker.",
         )
+
+    def test_receipt_class_survives(self) -> None:
+        self.assertTrue(isinstance(self.helper.get("ReviewReceipt"), type))
+        self.assertEqual(self.helper["RECEIPT_VERSION"], 2)
 
 
 class CanonicalDigestContract(unittest.TestCase):
@@ -115,6 +136,56 @@ class CanonicalDigestContract(unittest.TestCase):
             sha256_hex("abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
         )
+
+
+class ForkTestsStayOutOfUpstreamManifest(unittest.TestCase):
+    """D2: fork tests live in fork-tests/, never under skills/autoreview/tests/."""
+
+    def test_fork_tests_are_not_in_the_upstream_test_directory(self) -> None:
+        upstream_tests = ROOT / "skills" / "autoreview" / "tests"
+        self.assertTrue(upstream_tests.is_dir())
+        for name in FORK_TEST_NAMES:
+            self.assertFalse((upstream_tests / name).exists(), f"{name} moved back under skills/")
+            self.assertTrue((Path(__file__).with_name(name)).is_file())
+
+    def run_manifest_self_test(self, extra_test: str | None) -> subprocess.CompletedProcess[str]:
+        """Run upstream's unmodified manifest self-test against a minimal checkout copy."""
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            scripts = root / "scripts"
+            scripts.mkdir()
+            for name in ("check-skills", "check-skills.test.py", "windows_test_process.py"):
+                shutil.copy2(ROOT / "scripts" / name, scripts / name)
+            core = root / "skills" / "autoreview" / "scripts" / "autoreview_test.py"
+            core.parent.mkdir(parents=True)
+            core.write_text("", encoding="utf-8")
+            tests = root / "skills" / "autoreview" / "tests"
+            tests.mkdir()
+            # Names only: the self-test globs the directory, it does not import.
+            for path in (ROOT / "skills" / "autoreview" / "tests").glob("test_*.py"):
+                (tests / path.name).write_text("", encoding="utf-8")
+            if extra_test is not None:
+                shutil.copy2(Path(__file__).with_name(extra_test), tests / extra_test)
+            env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+            return subprocess.run(
+                [sys.executable, str(scripts / "check-skills.test.py"), MANIFEST_TEST],
+                cwd=root, env=env, text=True, capture_output=True, check=False, timeout=120,
+            )
+
+    def test_upstream_manifest_self_test_passes_without_fork_tests(self) -> None:
+        # Control: proves the fixture checkout is complete enough to pass, so the
+        # failures below are caused by the fork test file and nothing else.
+        result = self.run_manifest_self_test(None)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_upstream_manifest_self_test_fails_if_a_fork_test_is_put_back(self) -> None:
+        for name in FORK_TEST_NAMES:
+            with self.subTest(name=name):
+                result = self.run_manifest_self_test(name)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("FAIL: test_manifest_covers_checkout_test_files_in_their_groups",
+                              result.stderr)
+                self.assertIn(name, result.stderr)
 
 
 if __name__ == "__main__":

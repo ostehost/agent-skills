@@ -71,7 +71,16 @@ Reports drift, the marked conflict surface, and traps 1a/1b/2/3 below. It uses
 `git merge-tree --write-tree`, which computes the merge in the object store without
 touching the worktree or index. Safe to run at any time, including mid-investigation.
 
-**Resolve and gate against that tree before the merge runs.** `merge-tree` writes the real
+**Rehearsal required: resolve and gate against that tree before the merge runs.** Do not
+ask the owner to run the merge until a rehearsal exists for the exact upstream tip being
+merged: the resolved files, a manifest of every path with its content hash and mode, an
+apply script that refuses unless `HEAD`, `MERGE_HEAD` and the unmerged-path set match what
+was rehearsed, and both gates green on the rehearsed tree. If upstream moves, even by one
+commit, rebuild the rehearsal; the 2026-11 round was rehearsed against `16121cf`, upstream
+then landed `1f71b29`, and the bundle had to be rebuilt. Check modes against the preview's
+`git ls-tree -r`, not only against your own manifest: an earlier attempt lost the
+executable bit on `skills/agent-transcript/scripts/agent-transcript` and passed its own
+harness because the manifest carried the same error. `merge-tree` writes the real
 merged tree, so `git archive <tree> | tar -x -C <scratch>` materializes exactly what the merge
 will put in the worktree, conflict markers included. Resolve there, run the full gate there,
 and the merge itself becomes a formality: diff each conflicted file against the preview,
@@ -103,16 +112,24 @@ describe a workaround as hook-legal — if it reaches a denied topology, say so.
 
 | Class | Policy |
 | --- | --- |
-| Fork-only paths (`skills/design-competition/**`, `scripts/run-checks`, `docs/UPSTREAM-SYNC.md`) | No conflict possible. New files at fork-only paths cost nothing at merge time — prefer adding one over editing a shared file. |
+| Fork-only paths (`skills/design-competition/**`, `fork-tests/**`, `scripts/check-fork`, `scripts/run-checks`, `.github/workflows/fork-validate.yml`, `docs/UPSTREAM-SYNC.md`) | No conflict possible. New files at fork-only paths cost nothing at merge time — prefer adding one over editing a shared file. |
 | Upstream-only additions (e.g. `skills/beam`) | Take upstream wholesale. |
 | Inventory files (`README.md`, `skills.sh.json`, `AGENTS.md`) | Union, then reconcile by hand. `scripts/validate-skills` is the arbiter: it enforces that `skills.sh.json` references only existing skills, each in at most one grouping. |
-| `.github/workflows/validate.yml` | Take upstream's structure, re-apply the fork's steps (design-competition suites, the extra test modules). Then mirror the result into `scripts/run-checks` — the `python tests` module list must stay byte-identical between the two. |
+| `.github/workflows/validate.yml`, `scripts/check-skills`, `scripts/check-skills.test.py` | Take upstream's files. `check-skills` and its self-test stay byte-identical to upstream; `validate.yml` is upstream's plus one line, `if: github.repository == 'openclaw/agent-skills'` on `macos-sandbox`, because the fork has no `xcode-27` runner and a queued job would block `main`'s runs. Fork-only checks go in `scripts/check-fork` and `.github/workflows/fork-validate.yml`, never into these files. |
+| Fork tests of shared skills | Keep them under `fork-tests/<skill>/`. Upstream's manifest self-test requires every `skills/autoreview/tests/test_*.py` to be in its `TEST_MODULES`, so a fork test there turns upstream's gate red. |
 | `skills/autoreview/scripts/autoreview` | Expect a competing rewrite; write the union by hand — see below. |
 
 ### 5. Verify
 
-    scripts/run-checks          # must be fully green
+    PYTHON=<out-of-tree venv>/bin/python scripts/run-checks   # must be fully green
     scripts/upstream-survey     # drift should now read 0 behind
+
+The gate proves the working tree, not the commit. Before committing, stage the resolution
+path-limited from the rehearsal's list (every changed and added path, and both deletions),
+then run the rehearsal's index check, `verify-against-preview.sh --staged <repo>`. It fails
+while any path is unmerged, any index entry differs from the rehearsed tree, a rehearsed
+deletion is still staged, or a rehearsed file is untracked. Staging only the conflicted
+paths passes the worktree gate and still commits a tree that is missing the added files.
 
 Then confirm the invariant anchors below by hand. Traps 4 and 5 surface only here, so a
 red suite after a clean-looking resolution is expected — read each failure before assuming
@@ -192,11 +209,13 @@ What worked was writing the union by hand, region by region:
 Where the fork's divergence carries no real benefit, **yield to upstream to shrink the delta**.
 The fork's `list[str]` truncation reasons became upstream's `bool`:
 `ensure_reviewer_input_complete` already accepted both and the receipt contract never
-referenced them, so nothing degraded. `skills/autoreview/CLAUDE.md` is explicit that this file
-is canonical upstream and must not carry repo-local behaviour variants.
+referenced them, so nothing degraded. `skills/autoreview/AGENTS.md` names
+`openclaw/agent-skills` as the canonical source and says shared behaviour and fixes belong
+upstream. (Until the 2026-11 sync that rule lived in `skills/autoreview/CLAUDE.md`, which
+upstream deleted.)
 
-Use the gated `test_receipt_contract` (30 tests) as the specification for the re-applied
-receipt layer, and the survey's trap-1a list as the re-application checklist.
+Use the gated `fork-tests/autoreview/test_receipt_contract.py` as the specification for the
+re-applied receipt layer, and the survey's trap-1a list as the re-application checklist.
 
 **2026-08-20 refinement: decide the fork's policy questions BEFORE resolving, and the
 construction follows from them.** That round asked the owner two questions up front —
@@ -231,8 +250,10 @@ for every contributor.
 
 **The interpreter guard.** `find_command`, `first_executable_candidate`, `is_within`, and
 `has_directory_component` implement autoreview's refusal to execute any interpreter located
-inside the repository under review. They are byte-identical across merge-base, upstream, and
-fork — `sha256` prefix `5b3d5b7497fc217c`:
+inside the repository under review. After a sync the merged file must hash exactly as
+upstream's does. Until 2026-09-09 all three sides hashed to `sha256` prefix
+`5b3d5b7497fc217c`. Upstream changed these functions between `b86a912` and `1f71b29`, so
+from the 2026-11 sync on, upstream and the merged file hash to `ffed4e0d42cbb687`:
 
     for ref in "$(git merge-base upstream/main HEAD)" upstream/main HEAD; do
       git show "${ref}:skills/autoreview/scripts/autoreview" \
@@ -245,14 +266,22 @@ Note the braces. Written as `"$ref:skills/..."` this silently breaks under zsh, 
 command prints `e3b0c44298fc1c14` — the sha256 of empty input — for all three refs. Three
 matching hashes look like a pass. If you see `e3b0c44298fc1c14`, the check did not run.
 
-Any post-merge difference there is a defect, not a resolution.
+A merged hash that differs from upstream's is a defect, not a resolution. Re-pin the value
+here when upstream changes it.
 
 Practical consequence: `scripts/run-checks` must not hand autoreview an in-repo interpreter.
-The repo's own `.venv/` is refused by design, so the script uses `python3` from PATH and
-falls back to `.venv` only for the two steps that import PyYAML.
+It has no `.venv` fallback. It refuses to start when `$PYTHON` (default `python3`) lives
+inside the checkout, lacks PyYAML or Pillow, or resolves its temporary directory into the
+checkout or, on macOS, a shared scratch directory such as `/tmp`. Autoreview refuses those
+temporary roots, so a run under one fails about 134 tests for environment reasons only.
 
-**Gate mirroring.** `scripts/run-checks` mirrors `.github/workflows/validate.yml` step for
-step, by hand. Whenever one changes, change the other in the same commit.
+**Gate split.** `scripts/run-checks` runs upstream's `scripts/check-skills` (CI:
+`validate.yml`), then the fork's `scripts/check-fork` (CI: `fork-validate.yml`, an
+`ubuntu-latest` leg and a `windows-latest` leg with `--skip-design-competition`). There is
+no hand-kept mirror to update: `check-fork` derives what `check-skills` covers from its
+`TEST_MODULES` and command list, and its manifest fails when a test file is run by neither
+gate. `check-fork` also fails when a non-test script with a shebang has lost its executable
+bit, which no suite notices when it invokes the script through an interpreter.
 
 ## Why this fork exists, and the exit
 
@@ -274,3 +303,4 @@ add a justfile here.
 | 2026-08-20 | `88f8500` | `88f8500` | 23 behind / 68 ahead | **Synced.** 6 conflicts / 63 hunks — but only 11 of the 23 commits carried new content; 12 were the 08-10 cherry-picks re-presented by the stale base. Two conflicts (`skills.sh.json`, `pi-openclaw.ts`) were pure stale-base artifacts, resolved `--ours` after verifying the fork already carried the content. Upstream contracted hard: `autoreview` went 13,215 -> 6,034 lines across four unreviewed direct-to-main pushes (`4e3f4cf`, `ae1eebc`, `1ef3fab`, `ca100e6`). **Two owner decisions:** yield panels and `--parallel-tests` to upstream's removal, and take `SKILL.md` wholesale per `skills/autoreview/CLAUDE.md`. That collapsed three more conflicts to `git checkout upstream/main --`, leaving one real file. Adopted upstream's fail-closed TruffleHog pack scanning (replacing the whole local secret classifier), bounded engine runtime (`--engine-timeout-seconds`), portable Fable selector, strict beam share URLs, and crabbox portability. Preserved the receipt layer by construction — upstream's file as the base, the 17-symbol fork layer re-applied on top — verified against all 30 remaining `test_receipt_contract` tests. Retired 2 of its 32 tests (`parallel_tests_failed`, `allow_partial_panel`) as dead with the dropped features. `scripts/run-checks` green; 229 Python tests; interpreter guard still `5b3d5b7497fc217c`. |
 | 2026-09-02 | `0cdce54` | `0cdce54` | 27 behind / 69 ahead | **Synced by true merge.** This merge commit records upstream as its second parent; 4 conflicted files / 15 hunks matched the pre-merge survey. Adopted upstream's exact Git-source capture, complete mixed-target/evidence batching, pre-send rescans, raw-parent checks, preparation progress, Node 26 CI, bounded transcript discovery/reads, shell-free Windows session opener, Beam URL support, and Crabbox guidance. Preserved the fork's digest-bound receipt layer, immutable target/scope expectations, stdout-marker neutralization, transcript head/tail publication and redaction hardening, session-viewer parser parity tests, and design-competition gates. Retired the obsolete truncation-producer merge invariants after upstream replaced truncation with lossless `CapturedBundle`/evidence partitioning; the fork-only receipt symbol guard remains. `scripts/run-checks` passed with 285 Python tests, 122 Node tests, and both design-competition suites; the interpreter guard remained `5b3d5b7497fc217c`. |
 | 2026-09-09 | `b86a912` | `b86a912` | 14 behind / 70 ahead | **Synced by true merge.** 4 conflicted files / 9 hunks, exactly as the pre-merge survey predicted. The whole resolution was built and gated against `git merge-tree --write-tree` output *before* the merge ran, then applied to a worktree verified byte-identical to that preview. **Owner decision: yield TruffleHog to upstream's scanner-free policy (#240).** That is a deliberate posture change, not a mechanical resolution: the fail-closed pre-send scan of outgoing review packs is gone, replaced by upstream's prompt-level "report suspected credentials as P0" instruction. Chosen for delta minimization and because `skills/autoreview/CLAUDE.md` forbids repo-local behavior variants; upstream requires an explicit maintainer decision to reintroduce a scanner. It cost the fork-only receipt suite its `add_fake_trufflehog` stub (trap 1b), replaced by an explicit `PATH` prepend for the fake codex binary. Adopted upstream's `--status-output` sidecar, trusted OpenAI Responses route projection, caller-`HOME` auth helper, Claude capability-probe fix, session-viewer bounded reads, and Beam receiver limits. Preserved the receipt layer by construction: upstream's regions plus the fork's `args.model_used` attestation, `--receipt-output` path rejection, commit-SHA freezing, target binding, and the outer error-receipt `try/except` — with `write_review_status` threaded into both the fork's `run_review_passes` call site and its exit path. **Two silent defects the marked conflicts did not show:** the auto-merge produced a duplicate `buildSessionViewerHtml` import in `session-viewer.test.ts` (a SyntaxError with no conflict marker, both sides having added it), and the baseline was already red before the merge — `agent-transcript.test.mjs` ran `find` with no `--root`, walked the machine's real session logs, and tripped the 20,000-file discovery cap before reaching its assertion. Fixed hermetically; that is the same trap-4 sibling this playbook already documents. `scripts/run-checks` green: 315 Python tests (285 before), 133 Node tests, both design-competition suites; interpreter guard still `5b3d5b7497fc217c`. |
+| 2026-11-12 | `1f71b29` | `1f71b29` | 129 behind / 75 ahead | **Merged by the owner from a rehearsed resolution.** 14 conflicted files. The first rehearsal was built against `16121cf`; upstream then landed `1f71b29` (#391, a Beam fix), and the bundle was rebuilt from scratch, which is why the playbook now requires a rehearsal for the exact tip. **Owner decisions D1-D9:** upstream's `check-skills`, its self-test and `validate.yml` stay upstream's (plus one `macos-sandbox` repository guard), with fork checks moved to the new `scripts/check-fork` and `fork-validate.yml` (`ubuntu-latest` and `windows-latest --skip-design-competition`); the fork's receipt and merge-invariant tests moved to `fork-tests/autoreview/` because upstream's manifest self-test rejects unlisted tests under `skills/autoreview/tests/`; `install-skills` takes upstream's overlap refusal but keeps the fork's empty-catalog guard; upstream's npm dev dependency and Pillow pin are accepted; no secret scanner. Receipt layer re-applied onto upstream's file by construction: `model_used` carried back across upstream's `copy.copy(args)`, `interrupted` error kind, redaction before the digest, `--native-handoff` refused with `--receipt-output`, and, for local/branch targets, the base ref pinned and re-checked (including an A-B-A move and a move during the review) instead of rewriting the ref name to a SHA. An adversarial mutation pass found receipt behaviours no test pinned (status mapping for incomplete/filtered/incorrect reviews, three of four marker-neutralization sites, the reviewer key set, `--expect-*` without a receipt); each now has a test, and 65 of 67 receipt-layer mutants die (2 are equivalent). `check-fork` now also fails on a shebang script that lost its executable bit. Yielded to upstream the fork's `xcrun_db` exclude hunk in `test_autoreview_hardening.py`, which the 2026-09-09 resolution had added to keep a macOS `xcrun` cache out of one temp-root fixture; upstream's version passed 5 of 5 local macOS runs, so restore the exclude if that test flakes again. Rehearsed gates green: `check-skills --group all` 780 Python tests (16 skipped), 156 Node tests, typecheck; `check-fork` 180 Python tests, 5 Node tests, both design-competition suites; interpreter guard re-pinned to `ffed4e0d42cbb687`, equal to upstream. |

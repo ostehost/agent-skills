@@ -43,15 +43,6 @@ def same_real_path(left: Path, right: Path) -> bool:
         return False
 
 
-def target_is_source(source: Path, target: Path) -> bool:
-    # The target must never be the source entry itself. Resolve only the parent
-    # directories: resolving the leaf would let a symlinked source dir slip past
-    # (target symlink -> source real path), and removing it destroys the source.
-    if (target.parent.resolve() / target.name) == (source.parent.resolve() / source.name):
-        return True
-    return not target.is_symlink() and same_real_path(source, target)
-
-
 def remove_path(path: Path) -> None:
     if path.is_symlink() or path.is_file():
         path.unlink()
@@ -90,6 +81,18 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     target_root = Path(args.target).expanduser().absolute()
+    sources = [skills_root.resolve(), *(skills_root.joinpath(name).resolve() for name in available)]
+    for name in selected:
+        source = skills_root / name
+        target = target_root / name
+        if not target.is_symlink() and same_real_path(source, target):
+            continue
+        # Resolve the parent, not the entry: --force replaces a symlink itself.
+        entry = target.parent.resolve() / target.name
+        if any(entry.is_relative_to(path) or path.is_relative_to(entry) for path in sources):
+            print(f"target overlaps source, refusing: {target}", file=sys.stderr)
+            return 1
+
     if not args.dry_run:
         target_root.mkdir(parents=True, exist_ok=True)
 
@@ -102,7 +105,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"exists, skipping: {target}", file=sys.stderr)
                 continue
 
-            if target_is_source(source, target):
+            if not target.is_symlink() and same_real_path(source, target):
                 print(f"target is source, skipping: {target}", file=sys.stderr)
                 continue
 

@@ -1,0 +1,316 @@
+#!/usr/bin/env python3
+"""Run the fork-only checks that upstream's scripts/check-skills does not own.
+
+scripts/check-skills is upstream's file and stays byte-identical to it. Every
+fork-only suite runs here instead, and a manifest proves that every test file
+in the checkout is run by one of the two runners or is listed in KNOWN_UNGATED
+with a reason. Standard library only; the Python parts run on Windows.
+"""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import fnmatch
+import importlib.util
+import io
+import os
+import re
+import runpy
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+
+# Python suites loaded by file path inside check-skills' scrubbed fixture
+# environment. Fork tests must not live in skills/autoreview/tests/: upstream's
+# manifest self-test requires every test_*.py there to be in its TEST_MODULES.
+FORK_PYTHON_SUITES = (
+    "fork-tests/autoreview/test_receipt_contract.py",
+    "fork-tests/autoreview/test_merge_invariants.py",
+    "skills/diataxis/tests/test_audit_quadrant.py",
+)
+# Self-tests that run as their own process. run-checks is a bash gate for
+# POSIX developer machines, so its self-test does not run on Windows.
+FORK_SCRIPT_TESTS = ("scripts/check-fork.test.py",)
+POSIX_SCRIPT_TESTS = ("scripts/run-checks.test.py",)
+# Upstream ships this suite but check-skills does not run it.
+FORK_NODE_TESTS = ("skills/beam/scripts/beam-handoff.test.mjs",)
+# bash + jq; skipped only with --skip-design-competition.
+DESIGN_COMPETITION_SUITES = (
+    "skills/design-competition/scripts/check-conformance.sh",
+    "skills/design-competition/scripts/scripts.test.sh",
+)
+FORK_COMPILE = (
+    "scripts/check-fork",
+    "scripts/check-fork.test.py",
+    "scripts/run-checks.test.py",
+    "scripts/upstream-survey",
+    "skills/diataxis/scripts/audit_quadrant.py",
+    *FORK_PYTHON_SUITES,
+)
+KNOWN_UNGATED = {
+    "scripts/installed-autoreview.test.py":
+        "needs the pushed candidate's GitHub source archives; validate.yml's "
+        "installed-source job downloads them and runs it",
+}
+UPSTREAM_TEST_DIR = "skills/autoreview/tests"
+TEST_FILE_PATTERNS = (
+    "test_*.py", "*_test.py", "*.test.py", "*.test.mjs", "*.test.js", "*.test.ts", "*.test.sh",
+)
+SKIPPED_DIRECTORIES = {".git", ".venv", "node_modules", "fixtures", "__pycache__"}
+# Test modules and their imported helpers carry a shebang but are run through an
+# interpreter, so they are not required to be executable.
+NON_EXECUTABLE_SHEBANG_PATTERNS = (*TEST_FILE_PATTERNS, "test-*.py")
+
+
+def repository_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def checkout_path(root: Path, relative: str) -> Path:
+    return root.joinpath(*relative.split("/"))
+
+
+def load_check_skills(root: Path) -> dict:
+    # Reuse upstream's runner helpers rather than copying them.
+    return runpy.run_path(str(checkout_path(root, "scripts/check-skills")))
+
+
+def check_skills_paths(root: Path, helper: dict) -> tuple[set[str], set[str]]:
+    """Return (TEST_MODULES files, every checkout file check-skills names)."""
+    modules = set()
+    for entries in helper["TEST_MODULES"].values():
+        for entry in entries:
+            modules.add(entry if entry.endswith(".py") else entry.replace(".", "/") + ".py")
+    commands: list[list[str]] = []
+
+    def record(command, **kwargs):
+        commands.append([str(part) for part in command])
+        return subprocess.CompletedProcess(command, 0)
+
+    # Ask check-skills itself which commands it runs, without running them.
+    with mock.patch.object(subprocess, "run", side_effect=record), \
+            mock.patch.object(shutil, "which", side_effect=lambda name: name), \
+            contextlib.redirect_stdout(io.StringIO()):
+        status = helper["main"](["--group", "all"])
+    if status:
+        raise RuntimeError(f"check-skills command enumeration returned {status}")
+    named = set(modules)
+    for command in commands:
+        for argument in command[1:]:
+            if os.path.isabs(argument) or argument.startswith("-"):
+                continue
+            if checkout_path(root, argument.replace("\\", "/")).is_file():
+                named.add(Path(argument).as_posix())
+    return modules, named
+
+
+def discover_test_files(root: Path) -> set[str]:
+    found = set()
+    for directory, subdirectories, files in os.walk(root):
+        subdirectories[:] = sorted(name for name in subdirectories if name not in SKIPPED_DIRECTORIES)
+        for name in files:
+            if any(fnmatch.fnmatchcase(name, pattern) for pattern in TEST_FILE_PATTERNS):
+                found.add(Path(directory, name).relative_to(root).as_posix())
+    return found
+
+
+def executable_mode_errors(root: Path) -> list[str]:
+    """Every non-test file that starts with a shebang must keep its executable bit.
+
+    A merge or copy that drops the bit leaves suites green when they invoke the
+    script through an interpreter, so the mode is checked directly. POSIX only.
+    """
+    if os.name == "nt":
+        return []
+    errors = []
+    for directory, subdirectories, files in os.walk(root):
+        subdirectories[:] = sorted(name for name in subdirectories if name not in SKIPPED_DIRECTORIES)
+        for name in sorted(files):
+            path = Path(directory, name)
+            if path.is_symlink() or not path.is_file():
+                continue
+            if any(fnmatch.fnmatchcase(name, pattern) for pattern in NON_EXECUTABLE_SHEBANG_PATTERNS):
+                continue
+            try:
+                with path.open("rb") as handle:
+                    shebang = handle.read(2) == b"#!"
+            except OSError as exc:
+                errors.append(f"cannot read {path.relative_to(root).as_posix()}: {exc}")
+                continue
+            if shebang and not path.stat().st_mode & 0o100:
+                errors.append(f"script with a shebang lost its executable bit: {path.relative_to(root).as_posix()}")
+    return errors
+
+
+def fork_gated_paths() -> set[str]:
+    return {*FORK_PYTHON_SUITES, *FORK_SCRIPT_TESTS, *POSIX_SCRIPT_TESTS,
+            *FORK_NODE_TESTS, *DESIGN_COMPETITION_SUITES}
+
+
+def manifest_errors(root: Path) -> list[str]:
+    errors = []
+    try:
+        upstream_modules, upstream_named = check_skills_paths(root, load_check_skills(root))
+    except Exception as exc:
+        return [f"cannot enumerate scripts/check-skills coverage: {exc}"]
+    fork = fork_gated_paths()
+    for path in sorted(fork | set(FORK_COMPILE)):
+        if not checkout_path(root, path).is_file():
+            errors.append(f"listed fork check is missing: {path}")
+    for path in sorted(KNOWN_UNGATED):
+        if not checkout_path(root, path).is_file():
+            errors.append(f"KNOWN_UNGATED entry no longer exists: {path}")
+        elif path in fork or path in upstream_named:
+            errors.append(f"KNOWN_UNGATED entry is gated; remove it from the table: {path}")
+    for path in sorted(fork & upstream_named):
+        errors.append(f"fork check is also run by check-skills; drop it from check-fork: {path}")
+    prefix = UPSTREAM_TEST_DIR + "/"
+    for path in sorted(fork):
+        if path.startswith(prefix):
+            errors.append(f"fork test listed under {UPSTREAM_TEST_DIR}; move it to fork-tests/autoreview/: {path}")
+    upstream_dir = checkout_path(root, UPSTREAM_TEST_DIR)
+    for candidate in sorted(upstream_dir.glob("test_*.py")) if upstream_dir.is_dir() else ():
+        path = candidate.relative_to(root).as_posix()
+        if path not in upstream_modules:
+            errors.append(
+                f"{path} is not in check-skills TEST_MODULES, so upstream's manifest self-test "
+                "fails; fork tests belong in fork-tests/autoreview/"
+            )
+    covered = upstream_named | fork | set(KNOWN_UNGATED)
+    for path in sorted(discover_test_files(root) - covered):
+        errors.append(f"test file is not run by check-skills or check-fork and not in KNOWN_UNGATED: {path}")
+    return errors
+
+
+def fork_suite(root: Path) -> unittest.TestSuite:
+    loader = unittest.TestLoader()
+    tests = []
+
+    def flatten(suite):
+        for test in suite:
+            if isinstance(test, unittest.TestSuite):
+                yield from flatten(test)
+            else:
+                yield test
+
+    for relative in FORK_PYTHON_SUITES:
+        path = checkout_path(root, relative)
+        name = "check_fork_" + re.sub(r"\W", "_", relative.removesuffix(".py"))
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None or spec.loader is None:
+            raise ValueError(f"cannot load fork suite: {relative}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        if Path(module.__file__).resolve() != path.resolve():
+            raise ValueError(f"fork suite did not load from its checkout file: {relative}")
+        tests.extend(flatten(loader.loadTestsFromModule(module)))
+    if loader.errors:
+        raise ValueError("; ".join(loader.errors))
+    if not tests or len(tests) != len({test.id() for test in tests}):
+        raise ValueError("test discovery returned empty or duplicate test IDs")
+    return unittest.TestSuite(tests)
+
+
+def run_tests_only(root: Path) -> int:
+    helper = load_check_skills(root)
+    # Same scrubbed HOME/XDG/credential environment check-skills gives its suites.
+    with helper["fixture_environment"](), helper["repository_test_modules"](root):
+        try:
+            suite = fork_suite(root)
+        except Exception as exc:
+            print(f"test discovery failed: {exc}", file=sys.stderr)
+            return 1
+        result = unittest.TextTestRunner(resultclass=helper["ProgressTestResult"]).run(suite)
+        return 0 if result.wasSuccessful() else 1
+
+
+def main(argv: list[str] | None = None, *, root: Path | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--skip-design-competition", action="store_true",
+                        help="skip the bash + jq design-competition suites (Windows CI only)")
+    parser.add_argument("--manifest-only", action="store_true",
+                        help="check only that every test file is gated")
+    parser.add_argument("--tests-only", action="store_true",
+                        help="run only the fork Python suites in the scrubbed fixture environment")
+    args = parser.parse_args(argv)
+    root = repository_root() if root is None else root
+    if args.tests_only:
+        return run_tests_only(root)
+
+    failed = []
+    print("+ manifest: every test file is gated or listed in KNOWN_UNGATED", flush=True)
+    errors = manifest_errors(root)
+    for error in errors:
+        print(f"manifest: {error}", file=sys.stderr)
+    if errors:
+        failed.append("manifest")
+    print("+ executable modes: shebang scripts keep their executable bit", flush=True)
+    mode_errors = executable_mode_errors(root)
+    for error in mode_errors:
+        print(f"executable modes: {error}", file=sys.stderr)
+    if mode_errors:
+        failed.append("executable modes")
+    if args.manifest_only:
+        return 1 if failed else 0
+
+    python = sys.executable
+    flags = ["-S"] if sys.flags.no_site else []
+    steps: list[tuple[str, list[str]]] = [
+        ("py_compile fork python", [python, "-m", "py_compile", *FORK_COMPILE]),
+        *((path, [python, *flags, path]) for path in FORK_SCRIPT_TESTS),
+    ]
+    if os.name != "nt":
+        steps.extend((path, [python, *flags, path]) for path in POSIX_SCRIPT_TESTS)
+    else:
+        print("skip: " + ", ".join(POSIX_SCRIPT_TESTS) + " (bash gate; POSIX only)", flush=True)
+    steps.append(("fork python suites", [python, *flags, "scripts/check-fork", "--tests-only"]))
+    steps.append(("node fork suites", ["node", "--test", *FORK_NODE_TESTS]))
+    if args.skip_design_competition:
+        print("skip: design-competition suites (--skip-design-competition)", flush=True)
+    else:
+        for tool in ("bash", "jq"):
+            if shutil.which(tool) is None:
+                print(f"required executable not found: {tool} (design-competition suites need "
+                      "bash and jq; only Windows CI passes --skip-design-competition)", file=sys.stderr)
+                failed.append(f"design-competition ({tool} missing)")
+        if not any(name.startswith("design-competition") for name in failed):
+            steps.extend((path, ["bash", path]) for path in DESIGN_COMPETITION_SUITES)
+
+    for name, command in steps:
+        with contextlib.ExitStack() as cleanup:
+            if "py_compile" in command:
+                # Keep bytecode out of the checkout, as check-skills does.
+                cache = cleanup.enter_context(tempfile.TemporaryDirectory(prefix="check-fork-pycache."))
+                command = [command[0], "-X", f"pycache_prefix={cache}", *command[1:]]
+            display = "+ " + " ".join(command)
+            encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+            print(display.encode(encoding, "backslashreplace").decode(encoding), flush=True)
+            executable = shutil.which(command[0])
+            if executable is None:
+                print(f"required executable not found: {command[0]}", file=sys.stderr)
+                failed.append(name)
+                continue
+            result = subprocess.run([executable, *command[1:]], cwd=root)
+            if result.returncode:
+                print(f"FAILED ({result.returncode}): {name}", file=sys.stderr, flush=True)
+                failed.append(name)
+    if failed:
+        print(f"check-fork: {len(failed)} failed: " + ", ".join(failed), file=sys.stderr)
+        return 1
+    print("check-fork: all passed")
+    return 0
+
+
+if __name__ == "__main__":
+    scripts = Path(__file__).resolve().parent
+    bootstrap = runpy.run_path(str(scripts / "windows_test_process.py"))
+    status = bootstrap["ensure_windows_test_process"](sys.argv[0], sys.argv[1:])
+    if status is not None:
+        bootstrap["exit_test_process"](status)
+    raise SystemExit(main())

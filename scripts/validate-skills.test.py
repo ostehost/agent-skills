@@ -61,6 +61,28 @@ class ValidateSkillsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("unterminated YAML frontmatter", result.stderr)
 
+    def test_closing_delimiter_must_be_a_complete_line(self) -> None:
+        for delimiter in ("----", "---suffix"):
+            with self.subTest(delimiter=delimiter):
+                result = self.run_validator(
+                    {"sample": f"---\nname: sample\ndescription: Example\n{delimiter}\n"}
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("unterminated YAML frontmatter", result.stderr)
+
+    def test_closing_delimiter_allows_trailing_whitespace(self) -> None:
+        result = self.run_validator(
+            {"sample": "---\nname: sample\ndescription: Example\n--- \t\n# Sample\n"}
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_falsey_yaml_values_are_not_mappings(self) -> None:
+        for value in ("false", "0", "[]", '""'):
+            with self.subTest(value=value):
+                result = self.run_validator({"sample": f"---\n{value}\n---\n"})
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("YAML frontmatter must be a mapping", result.stderr)
+
     def test_closing_delimiter_must_occupy_its_own_line(self) -> None:
         result = self.run_validator(
             {
@@ -81,13 +103,6 @@ class ValidateSkillsTest(unittest.TestCase):
         self.assertNotIn("unterminated", result.stderr)
         self.assertIn("missing name", result.stderr)
         self.assertIn("missing description", result.stderr)
-
-    def test_closing_delimiter_allows_trailing_whitespace(self) -> None:
-        result = self.run_validator(
-            {"sample": '---\nname: sample\ndescription: "Example"\n--- \n# Sample\n'}
-        )
-
-        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_undecodable_skill_file_fails_readably(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

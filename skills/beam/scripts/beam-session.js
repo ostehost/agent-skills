@@ -36,11 +36,7 @@ function uniqueRealFiles(files) {
 }
 
 function walkJsonl(root, match, state, out) {
-  if (!root || !fs.existsSync(root)) return;
-  if (state.files >= state.maxFiles) {
-    state.exhausted = true;
-    return;
-  }
+  if (state.exhausted || !root || !fs.existsSync(root)) return;
   let entries;
   try {
     entries = fs.readdirSync(root, { withFileTypes: true });
@@ -48,10 +44,7 @@ function walkJsonl(root, match, state, out) {
     return;
   }
   for (const entry of entries) {
-    if (state.files >= state.maxFiles) {
-      state.exhausted = true;
-      break;
-    }
+    if (state.exhausted) break;
     if (entry.name === ".git" || entry.name === "node_modules") continue;
     const candidate = path.join(root, entry.name);
     if (entry.isDirectory()) {
@@ -59,6 +52,10 @@ function walkJsonl(root, match, state, out) {
       continue;
     }
     if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+    if (state.files >= state.maxFiles) {
+      state.exhausted = true;
+      break;
+    }
     state.files++;
     if (match(entry.name, candidate)) out.push(candidate);
   }
@@ -79,9 +76,7 @@ function readPrefix(file, maxBytes = TRANSCRIPT_HEAD_BYTES) {
   try {
     const stat = fs.fstatSync(fd);
     const size = Math.min(stat.size, maxBytes);
-    const buffer = Buffer.alloc(size);
-    fs.readSync(fd, buffer, 0, size, 0);
-    return buffer.toString("utf8");
+    return readRegion(fd, 0, size);
   } finally {
     fs.closeSync(fd);
   }
@@ -145,8 +140,15 @@ export function resolveCodexSession(threadId, env = process.env, options = {}) {
 
 function readRegion(fd, start, length) {
   const buffer = Buffer.alloc(length);
-  const read = fs.readSync(fd, buffer, 0, length, start);
-  return buffer.subarray(0, read).toString("utf8");
+  let offset = 0;
+  while (offset < length) {
+    const read = fs.readSync(fd, buffer, offset, length - offset, start + offset);
+    if (read === 0) {
+      throw new Error("session file ended before the expected read completed; retry publication");
+    }
+    offset += read;
+  }
+  return buffer.toString("utf8");
 }
 
 function completeHead(text) {
@@ -190,11 +192,40 @@ function parseRows(file) {
   return { rows, truncated: bounded.truncated };
 }
 
+// Beam carries text only (the receiver caps each request), so assets never
+// travel. A visible placeholder tells Team readers something was there.
+const ASSET_BLOCK_TYPES = ["image", "image_url", "input_image", "local_image", "document", "input_file", "file"];
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "";
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
+function safeMediaType(value) {
+  return typeof value === "string" && /^[a-z]+\/[a-z0-9.+-]{1,64}$/i.test(value) ? value.toLowerCase() : "";
+}
+
+export function assetPlaceholder(kind, details = {}) {
+  const name = typeof details.name === "string" && /^[^\\/\s][^\\/]{0,119}$/.test(details.name) ? details.name : "";
+  const meta = [safeMediaType(details.mediaType), formatBytes(details.bytes)].filter(Boolean).join(", ");
+  return `[Beam asset omitted: ${kind}${name ? ` ${name}` : ""}${meta ? ` (${meta})` : ""}]`;
+}
+
+function assetBlockPlaceholder(block, type) {
+  const source = isRecord(block.source) ? block.source : {};
+  const data = typeof source.data === "string" ? source.data : typeof block.data === "string" ? block.data : "";
+  const bytes = data ? Math.floor((data.length * 3) / 4) : undefined;
+  const kind = type === "document" || type.includes("file") ? "file" : "image";
+  return assetPlaceholder(kind, { mediaType: source.media_type || block.media_type || block.mime_type, bytes });
+}
+
 function textBlock(block) {
   if (typeof block === "string") return block;
   if (!isRecord(block)) return "";
   const type = String(block.type || "").toLowerCase();
-  if (["thinking", "reasoning", "tool_use", "tool_result", "image", "image_url"].includes(type)) {
+  if (ASSET_BLOCK_TYPES.includes(type)) return assetBlockPlaceholder(block, type);
+  if (["thinking", "reasoning", "tool_use", "tool_result"].includes(type)) {
     return "";
   }
   if (["text", "input_text", "output_text"].includes(type) && typeof block.text === "string") {
@@ -218,6 +249,7 @@ function visibleText(content) {
 
 function stripInternalWrappers(input) {
   return String(input || "")
+    .replace(/\[Image(?: #\d+)?: source: [^\]\r\n]+\]/gi, () => assetPlaceholder("image"))
     .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, "")
     .replace(/<local-command-caveat>[\s\S]*?<\/local-command-caveat>/gi, "")
     .replace(/<command-name>[\s\S]*?<\/command-name>/gi, "")
@@ -487,6 +519,16 @@ function redactSecretBearingLines(text, stats) {
   return output.join("\n");
 }
 
+// Calendar dates (2026.12.06, 2026-12-04, 06/12/2026) share the phone rule's
+// shape but are not contact data; keep them readable.
+function isDateLike(value) {
+  const trimmed = value.trim();
+  const ymd = /^(\d{4})([./-])(\d{1,2})\2(\d{1,2})$/.exec(trimmed);
+  if (ymd) return Number(ymd[3]) >= 1 && Number(ymd[3]) <= 12 && Number(ymd[4]) >= 1 && Number(ymd[4]) <= 31;
+  const dmy = /^(\d{1,2})([./-])(\d{1,2})\2(\d{4})$/.exec(trimmed);
+  return Boolean(dmy) && Number(dmy[1]) >= 1 && Number(dmy[1]) <= 31 && Number(dmy[3]) >= 1 && Number(dmy[3]) <= 31;
+}
+
 function redact(input, stats) {
   let text = redactYamlSecretBlocks(stripInternalWrappers(input), stats);
   const fixedRules = [
@@ -504,7 +546,7 @@ function redact(input, stats) {
     [/\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{12,}/gi, "[REDACTED_AUTH_HEADER]"],
     [/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi, "$1[REDACTED]@"],
     [/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[REDACTED_EMAIL]"],
-    [/\b(?:\+?\d[\d .()-]{7,}\d)\b/g, "[REDACTED_PHONE]"],
+    [/\b(?:\+?\d[\d .()-]{7,}\d)\b/g, (match) => (isDateLike(match) ? match : "[REDACTED_PHONE]")],
     [/([?&#](?:token|key|secret|signature|sig|access_token|auth|password|passwd|api_key|client_secret)=)[^\s`"'>&#]+/gi, "$1[REDACTED]"],
   ];
   for (const [pattern, replacement] of fixedRules) {
@@ -618,7 +660,7 @@ function addTool(stats, name) {
   stats.toolCalls++;
 }
 
-function pushMessage(items, _seen, type, input, stats, maxChars) {
+function pushMessage(items, type, input, stats, maxChars) {
   const text = sanitizeVisibleText(input, { stats, maxChars });
   if (text) items.push({ type, text });
 }
@@ -675,11 +717,26 @@ function activeClaudeRows(rows) {
   return primary.filter((row) => typeof row.uuid === "string" && chain.has(row.uuid));
 }
 
+const FILE_DELIVERY_TOOLS = new Set(["SendUserFile"]);
+
+function deliveredFilePlaceholders(block) {
+  if (!FILE_DELIVERY_TOOLS.has(block.name) || !isRecord(block.input) || !Array.isArray(block.input.files)) return [];
+  return block.input.files.slice(0, 20).filter((file) => typeof file === "string" && file.trim()).map((file) => {
+    let bytes;
+    try {
+      bytes = fs.statSync(file).size;
+    } catch {
+      // Relative or since-removed files still get a name-only placeholder.
+    }
+    return assetPlaceholder("file", { name: path.basename(file), bytes });
+  });
+}
+
 function parseClaude(rows, options) {
   const items = [];
-  const seen = new Set();
   const stats = { redactions: 0, toolCalls: 0, toolOutputsDropped: 0, toolFamilies: {} };
   let identity = null;
+  let sourceModel;
   for (const row of activeClaudeRows(rows)) {
     if (!isRecord(row)) continue;
     if (!identity && typeof row.sessionId === "string") identity = row.sessionId;
@@ -689,35 +746,45 @@ function parseClaude(rows, options) {
     const message = isRecord(row.message) ? row.message : row;
     if (message.isMeta === true || message.isCompactSummary === true) continue;
     const role = String(message.role || row.type || "").toLowerCase();
+    // Claude assistant messages carry the Anthropic SDK's response model ID.
+    if (role === "assistant") sourceModel = beamSourceModel("anthropic", message.model) || sourceModel;
     const content = message.content;
     if (Array.isArray(content)) {
       for (const block of content) {
         if (!isRecord(block)) continue;
-        if (block.type === "tool_use") addTool(stats, block.name || "tool_use");
+        if (block.type === "tool_use") {
+          addTool(stats, block.name || "tool_use");
+          if (role === "assistant") for (const text of deliveredFilePlaceholders(block)) items.push({ type: "agentMessage", text });
+        }
         if (block.type === "tool_result") stats.toolOutputsDropped++;
       }
     }
     if (row.type === "tool_use") addTool(stats, row.name || "tool_use");
     if (row.type === "tool_result") stats.toolOutputsDropped++;
-    if (role === "user") pushMessage(items, seen, "userMessage", visibleText(content ?? message), stats, options.maxChars);
-    if (role === "assistant") pushMessage(items, seen, "agentMessage", visibleText(content ?? message), stats, options.maxChars);
+    if (role === "user") pushMessage(items, "userMessage", visibleText(content ?? message), stats, options.maxChars);
+    if (role === "assistant") pushMessage(items, "agentMessage", visibleText(content ?? message), stats, options.maxChars);
   }
-  return { source: "claude", identity, items, stats };
+  return { source: "claude", identity, items, stats, ...(sourceModel ? { sourceModel } : {}) };
+}
+
+function beamSourceModel(provider, model) {
+  if (typeof provider !== "string" || !/^[a-z0-9._-]{1,64}$/i.test(provider) || typeof model !== "string" || !/^[a-z0-9][a-z0-9._:/-]{0,255}$/i.test(model) || sanitizeVisibleText(model, { maxChars: 256 }) !== model) return undefined;
+  return { provider: provider.toLowerCase(), model };
 }
 
 function normalizedType(value) {
   return String(value || "").replace(/[^a-z0-9]/gi, "").toLowerCase();
 }
 
-function parseCodexItem(item, items, seen, stats, options) {
+function parseCodexItem(item, items, stats, options) {
   if (!isRecord(item)) return;
   const type = normalizedType(item.type);
   if (type === "usermessage") {
-    pushMessage(items, seen, "userMessage", visibleText(item.content ?? item.text ?? item.message), stats, options.maxChars);
+    pushMessage(items, "userMessage", visibleText(item.content ?? item.text ?? item.message), stats, options.maxChars);
     return;
   }
   if (type === "agentmessage") {
-    pushMessage(items, seen, "agentMessage", visibleText(item.content ?? item.text ?? item.message), stats, options.maxChars);
+    pushMessage(items, "agentMessage", visibleText(item.content ?? item.text ?? item.message), stats, options.maxChars);
     return;
   }
   if (["reasoning", "plan", "contextcompaction", "compaction"].includes(type)) return;
@@ -737,9 +804,10 @@ function parseCodexItem(item, items, seen, stats, options) {
 
 function parseCodex(rows, options) {
   const items = [];
-  const seen = new Set();
   const stats = { redactions: 0, toolCalls: 0, toolOutputsDropped: 0, toolFamilies: {} };
   let identity = null;
+  let provider;
+  let sourceModel;
   const hasEventDialogue = rows.some((row) => {
     if (row?.type !== "event_msg") return false;
     const type = normalizedType(row?.payload?.type);
@@ -755,13 +823,18 @@ function parseCodex(rows, options) {
     const payload = isRecord(row.payload) ? row.payload : {};
     if (row.type === "session_meta" && typeof payload.id === "string") {
       identity = payload.id;
+      provider = payload.model_provider;
+      continue;
+    }
+    if (row.type === "turn_context") {
+      sourceModel = beamSourceModel(provider, payload.model) || sourceModel;
       continue;
     }
     if (row.type === "event_msg") {
       const type = normalizedType(payload.type);
-      if (type === "usermessage") pushMessage(items, seen, "userMessage", visibleText(payload.message ?? payload.content), stats, options.maxChars);
-      else if (type === "agentmessage") pushMessage(items, seen, "agentMessage", visibleText(payload.message ?? payload.content), stats, options.maxChars);
-      else if (type === "itemcompleted") parseCodexItem(payload.item, items, seen, stats, options);
+      if (type === "usermessage") pushMessage(items, "userMessage", visibleText(payload.message ?? payload.content), stats, options.maxChars);
+      else if (type === "agentmessage") pushMessage(items, "agentMessage", visibleText(payload.message ?? payload.content), stats, options.maxChars);
+      else if (type === "itemcompleted") parseCodexItem(payload.item, items, stats, options);
       continue;
     }
     if (row.type !== "response_item") continue;
@@ -771,7 +844,6 @@ function parseCodex(rows, options) {
       if (hasEventDialogue) continue;
       pushMessage(
         items,
-        seen,
         payload.role === "user" ? "userMessage" : "agentMessage",
         visibleText(payload.content),
         stats,
@@ -783,7 +855,7 @@ function parseCodex(rows, options) {
     if (type.includes("output")) stats.toolOutputsDropped++;
     else if (type) addTool(stats, payload.name || payload.type);
   }
-  return { source: "codex", identity, items, stats };
+  return { source: "codex", identity, items, stats, ...(sourceModel ? { sourceModel } : {}) };
 }
 
 function toolSummary(stats) {

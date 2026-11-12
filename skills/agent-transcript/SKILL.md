@@ -19,15 +19,15 @@ URL or deployment/test target. Do not offer separate exports.
 Default file discovery/rendering reads local Codex, Claude, Pi, and OpenClaw
 logs without network calls. Never upload raw logs.
 
+Resolve `TRANSCRIPT_SKILL_DIR` to the directory containing this `SKILL.md`.
+Invoke that installation without changing the consumer's working directory.
+
 ```bash
-skills/agent-transcript/scripts/agent-transcript find \
+"$TRANSCRIPT_SKILL_DIR/scripts/agent-transcript" find \
   --query "$PR_TITLE $BRANCH_OR_PR_URL" --cwd "$PWD" --since-days 14
-skills/agent-transcript/scripts/agent-transcript render \
+"$TRANSCRIPT_SKILL_DIR/scripts/agent-transcript" render \
   --session "$SESSION_JSONL" --out /tmp/agent-transcript.md
 ```
-
-In downstream repositories that sync under `.agents/skills`, replace
-`skills/agent-transcript` with `.agents/skills/agent-transcript`.
 
 `find` scans the newest 400 matching logs by default; `--max-files N` widens
 local discovery. Treat matches as candidates, not proof of scope.
@@ -40,6 +40,8 @@ at most 12,000 lines. `--max-read-bytes N` changes the byte limit. Preserve the
 visible partial-transcript notice and `sourceTruncated` stats through trimming,
 preview, and insertion; omitted source must never be described as complete.
 These are file-read limits, not limits on the separate app-server rendering mode.
+Short filesystem reads are retried. Unexpected EOF stops rendering or discovery
+instead of treating incomplete input as a complete session.
 
 Automatically trim the rendered Markdown **before showing, previewing, or
 inserting it**. Keep only task-relevant user prompts, visible decisions, terse

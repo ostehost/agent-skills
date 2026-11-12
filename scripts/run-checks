@@ -1,110 +1,141 @@
 #!/usr/bin/env bash
-# Run the same checks .github/workflows/validate.yml runs, locally and in one command.
-# Mirrors that workflow step-for-step so a green run here means a green run in CI.
-# Directly runnable, no build step (AGENTS.md "Architecture").
+# Local gate for this fork: upstream's scripts/check-skills (what validate.yml
+# runs), then the fork-only scripts/check-fork (what fork-validate.yml runs).
+# Directly runnable, no build step (AGENTS.md "Architecture"). POSIX only.
 #
-# INTERPRETER: uses `python3`/`node` from PATH, falling back to the in-repo .venv
-# only for the two steps that import PyYAML. The autoreview interpreter guard
-# (find_command, skills/autoreview/scripts/autoreview) still refuses any executable
-# inside the repo under review, but the self-tests that made an in-repo interpreter
-# fail outright were removed upstream in the 2026-08-20 sync; the remaining suites
-# pass under either interpreter. Prefer an interpreter outside this tree anyway.
+# PREFLIGHT refuses to start, before any slow step, when:
+#   - the interpreter ($PYTHON, default python3) lives inside this checkout.
+#     autoreview refuses any interpreter inside the repository under review
+#     (find_command / first_executable_candidate), so an in-repo .venv is not
+#     usable for these suites;
+#   - that interpreter lacks PyYAML or Pillow (requirements-dev.txt);
+#   - its temporary directory resolves inside this checkout or, on macOS, into
+#     a shared scratch directory. This mirrors safe_temp_root() in
+#     skills/autoreview/scripts/autoreview, which refuses those roots for Codex
+#     runs; under them most autoreview suites fail for environment reasons;
+#   - node, npm, or the npm dev dependencies (node_modules) are missing.
 set -uo pipefail
 # Fail loudly rather than checking whatever directory we happen to be in.
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" \
   || { echo "run-checks: cannot cd to the repository root" >&2; exit 2; }
 
 PY="${PYTHON:-python3}"
-NODE="${NODE:-node}"
+refuse() {
+  echo "run-checks: $1" >&2
+  shift
+  local line
+  for line in "$@"; do echo "            $line" >&2; done
+  exit 2
+}
+
+PY_PATH="$(command -v "$PY")" || refuse "$PY not on PATH" \
+  "Set PYTHON to an interpreter outside this checkout with requirements-dev.txt installed."
+
+# Prints the resolved temporary root on success; prints one refusal and exits 2
+# otherwise. The interpreter's own tempfile.gettempdir() decides, exactly as it
+# will for autoreview (TMPDIR, then TEMP, then TMP, then platform defaults).
+PREFLIGHT='
+import os, sys
+if sys.path and sys.path[0] in ("", os.getcwd()):
+    del sys.path[0]  # never import from the checkout under test
+import importlib, tempfile
+from pathlib import Path
+
+roots = {Path(os.environ.get("PWD") or os.getcwd()), Path(os.getcwd()), Path.cwd().resolve()}
+command = sys.argv[1]
+
+def is_within(path, parent):
+    return path == parent or path.is_relative_to(parent)
+
+def in_checkout(path):
+    return any(is_within(path, root) for root in roots)
+
+def refuse(*lines):
+    print("\n".join(lines))
+    sys.exit(2)
+
+for label, candidate in (
+    ("interpreter", Path(os.path.abspath(command))),
+    ("interpreter", Path(command).resolve()),
+    ("interpreter", Path(os.path.abspath(sys.executable))),
+    ("interpreter", Path(sys.executable).resolve()),
+    ("interpreter prefix", Path(sys.prefix).resolve()),
+):
+    if in_checkout(candidate):
+        refuse(f"{label} {candidate} is inside the checkout; autoreview refuses in-repo interpreters.",
+               "Use one outside this tree, e.g. python3 -m venv ~/.venvs/agent-skills &&",
+               "~/.venvs/agent-skills/bin/python -m pip install -r requirements-dev.txt,",
+               "then PYTHON=~/.venvs/agent-skills/bin/python scripts/run-checks")
+
+def importable(module):
+    try:
+        importlib.import_module(module)
+    except ImportError:
+        return False
+    return True
+
+missing = " and ".join(name for name, module in (("PyYAML", "yaml"), ("Pillow", "PIL"))
+                       if not importable(module))
+if missing:
+    refuse(f"{sys.executable} lacks {missing}.",
+           f"Run: {sys.executable} -m pip install -r requirements-dev.txt")
+
+try:
+    temp = Path(tempfile.gettempdir()).resolve(strict=True)
+except OSError as exc:
+    refuse(f"unable to resolve the temporary directory: {exc}")
+if in_checkout(temp):
+    refuse(f"temporary directory {temp} is inside the checkout.",
+           "Unset or relocate TMPDIR/TMP/TEMP.")
+# Same roots as CODEX_MACOS_SCRATCH_ROOTS in skills/autoreview/scripts/autoreview.
+scratch = ("/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp")
+if sys.platform == "darwin" and any(is_within(temp, Path(item)) for item in scratch):
+    refuse(f"temporary directory {temp} is a shared scratch directory; autoreview refuses it.",
+           "Unset TMPDIR/TMP/TEMP to use the macOS per-user temporary directory (/var/folders/...).")
+print(temp)
+'
+if ! preflight="$("$PY" -c "$PREFLIGHT" "$PY_PATH" 2>&1)"; then
+  first="${preflight%%$'\n'*}"
+  rest=()
+  if [ "$first" != "$preflight" ]; then
+    while IFS= read -r line; do rest+=("$line"); done <<<"${preflight#*$'\n'}"
+  fi
+  refuse "$first" ${rest[@]+"${rest[@]}"}
+fi
+TEMP_ROOT="$preflight"
+# Hand every step the resolved spelling. The macOS default TMPDIR (/var/folders/...)
+# goes through the /var -> /private/var symlink, and upstream's
+# scripts/windows-test-process.test.py compares a temp root with a child's
+# realpath'd cwd, so the unresolved spelling fails it for environment reasons.
+export TMPDIR="$TEMP_ROOT"
+
+command -v node >/dev/null || refuse "node not on PATH" "Install the Node version validate.yml pins."
+command -v npm  >/dev/null || refuse "npm not on PATH"  "Install the Node version validate.yml pins."
+[ -x node_modules/.bin/tsc ] || refuse "npm dev dependencies are missing (node_modules/.bin/tsc)." \
+  "Run: npm ci --ignore-scripts"
+
+LOG="$(mktemp "$TEMP_ROOT/run-checks.XXXXXX")" || refuse "cannot create a log file in $TEMP_ROOT"
+trap 'rm -f "$LOG"' EXIT
 failed=()
 
 step() { # step <name> <cmd...>
   local name="$1"; shift
-  if "$@" >/tmp/run-checks.$$ 2>&1; then
+  if "$@" >"$LOG" 2>&1; then
     printf '  ok    %s\n' "$name"
   else
     printf '  FAIL  %s\n' "$name"
-    sed 's/^/          /' /tmp/run-checks.$$ | tail -25
+    sed 's/^/          /' "$LOG" | tail -40
+    local kept
+    kept="$(mktemp "$TEMP_ROOT/run-checks.$(printf '%s' "$name" | tr -c 'A-Za-z0-9' '-').XXXXXX")" \
+      && cp "$LOG" "$kept" && printf '          full log: %s\n' "$kept"
     failed+=("$name")
   fi
-  rm -f /tmp/run-checks.$$
 }
 
-command -v "$PY"   >/dev/null || { echo "run-checks: $PY not on PATH" >&2; exit 2; }
-command -v "$NODE" >/dev/null || { echo "run-checks: $NODE not on PATH" >&2; exit 2; }
+echo "run-checks ($("$PY" -V 2>&1) at $PY_PATH, node $(node --version), TMPDIR root $TEMP_ROOT)"
 
-# Only validate-skills and its test import PyYAML; every other step runs on a bare
-# interpreter. CI installs requirements-dev.txt into its setup-python, so one interpreter
-# covers everything there. Locally the repo's own .venv/ (gitignored) usually carries
-# PyYAML, and it is safe for these two steps precisely because they are plain repo tooling
-# that never re-invokes autoreview, so the interpreter guard never sees it.
-PY_YAML="$PY"
-if ! "$PY" -c 'import yaml' 2>/dev/null; then
-  if [ -x .venv/bin/python ] && .venv/bin/python -c 'import yaml' 2>/dev/null; then
-    PY_YAML="$PWD/.venv/bin/python"
-  else
-    echo "run-checks: PyYAML missing for $PY and no usable .venv." >&2
-    echo "            Run: $PY -m pip install -r requirements-dev.txt" >&2
-    exit 2
-  fi
-fi
-
-echo "run-checks ($("$PY" -V 2>&1), $("$NODE" --version))"
-[ "$PY_YAML" = "$PY" ] || echo "  note  PyYAML steps use $PY_YAML"
-
-step "validate skill frontmatter" \
-  "$PY_YAML" scripts/validate-skills
-
-step "check shell scripts" \
-  bash -n skills/autoreview/scripts/test-review-harness
-
-step "check python scripts" \
-  "$PY" -m py_compile \
-    scripts/install-skills scripts/install-skills.test.py \
-    scripts/upstream-survey \
-    scripts/validate-skills scripts/validate-skills.test.py \
-    skills/autoreview/scripts/autoreview \
-    skills/autoreview/scripts/test-review-harness.py \
-    skills/autoreview/scripts/autoreview_test.py \
-    skills/autoreview/tests/test_receipt_contract.py \
-    skills/autoreview/tests/test_merge_invariants.py \
-    skills/diataxis/scripts/audit_quadrant.py \
-    skills/diataxis/tests/test_audit_quadrant.py
-
-step "repository script tests: install-skills" "$PY" scripts/install-skills.test.py
-step "repository script tests: validate-skills" "$PY_YAML" scripts/validate-skills.test.py
-
-# Keep this module list byte-identical to the "Run Python tests" step in
-# .github/workflows/validate.yml -- the two gates must not drift.
-step "python tests" \
-  "$PY" -m unittest skills/autoreview/scripts/autoreview_test.py \
-    skills.autoreview.tests.test_autoreview_hardening \
-    skills.autoreview.tests.test_codex_sandbox \
-    skills.autoreview.tests.test_codex_inference_route \
-    skills.autoreview.tests.test_receipt_contract \
-    skills.autoreview.tests.test_merge_invariants \
-    skills.diataxis.tests.test_audit_quadrant
-
-step "check node scripts" \
-  "$NODE" --check skills/agent-transcript/scripts/agent-transcript
-step "check node scripts: beam" \
-  "$NODE" --check skills/beam/scripts/beam
-step "check node scripts: beam-session" \
-  "$NODE" --check skills/beam/scripts/beam-session.js
-
-step "node tests" \
-  "$NODE" --test skills/agent-transcript/scripts/agent-transcript.test.mjs \
-    skills/beam/scripts/beam.test.mjs \
-    skills/session-viewer/scripts/session-viewer.test.ts
-
-# CI gates these to Linux (the matrix's other leg is Windows, which lacks jq/bash).
-# Any POSIX box with jq can run them, so gate on the dependency, not the OS.
-if command -v jq >/dev/null; then
-  step "design-competition conformance (C1-C8)" skills/design-competition/scripts/check-conformance.sh
-  step "design-competition script tests"        skills/design-competition/scripts/scripts.test.sh
-else
-  echo "  skip  design-competition suites (jq not on PATH)"
-fi
+step "check-skills" "$PY" scripts/check-skills
+step "check-fork"   "$PY" scripts/check-fork
 
 if [ ${#failed[@]} -eq 0 ]; then
   echo "ALL CHECKS PASSED"

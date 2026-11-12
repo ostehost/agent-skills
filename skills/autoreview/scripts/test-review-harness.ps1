@@ -12,8 +12,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$Harness = Join-Path $PSScriptRoot 'test-review-harness.py'
+$Harness = [IO.Path]::Combine($PSScriptRoot, 'test-review-harness.py')
 $ForwardedArgs = @()
+$Candidates = @(
+    @{ Name = 'py'; Arguments = @('-3') },
+    @{ Name = 'python3'; Arguments = @() },
+    @{ Name = 'python'; Arguments = @() }
+)
 
 if ($Help) {
     $ForwardedArgs += '--help'
@@ -29,26 +34,33 @@ if ($PSBoundParameters.ContainsKey('Engine')) {
     }
 }
 
-# Windows-first probe: the py launcher only exists on Windows, so it wins
-# there; macOS/Linux pwsh falls through to python3 then python, matching the
-# bash wrapper's probe order.
-$PyLauncher = Get-Command py -ErrorAction SilentlyContinue
-if ($null -ne $PyLauncher) {
-    & $PyLauncher.Source -3 $Harness @ForwardedArgs
+foreach ($Candidate in $Candidates) {
+    # Missing executable names must not trigger unrelated module discovery.
+    $Command = $null
+    foreach ($Application in $ExecutionContext.InvokeCommand.GetCommands(
+        $Candidate.Name, [System.Management.Automation.CommandTypes]::Application, $false
+    )) {
+        $Command = $Application
+        break
+    }
+    if ($null -eq $Command) {
+        continue
+    }
+
+    $LauncherArgs = $Candidate.Arguments
+    try {
+        & $Command.Source @LauncherArgs -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' *> $null
+    }
+    catch {
+        continue
+    }
+    if ($LASTEXITCODE -ne 0) {
+        continue
+    }
+
+    & $Command.Source @LauncherArgs $Harness @ForwardedArgs
     exit $LASTEXITCODE
 }
 
-$Python3 = Get-Command python3 -ErrorAction SilentlyContinue
-if ($null -ne $Python3) {
-    & $Python3.Source $Harness @ForwardedArgs
-    exit $LASTEXITCODE
-}
-
-$Python = Get-Command python -ErrorAction SilentlyContinue
-if ($null -ne $Python) {
-    & $Python.Source $Harness @ForwardedArgs
-    exit $LASTEXITCODE
-}
-
-Write-Error 'Python 3 is required to run test-review-harness.'
+[Console]::Error.WriteLine('Python 3.10 or newer is required to run test-review-harness.')
 exit 127

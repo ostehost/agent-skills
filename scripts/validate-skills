@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -28,34 +29,20 @@ def load_frontmatter(text: str) -> tuple[dict[object, object] | None, str | None
     if not text.startswith("---\n"):
         return None, "missing YAML frontmatter"
 
-    close = frontmatter_end(text)
-    if close == -1:
+    close = re.search(r"^---[ \t]*$", text[4:], re.MULTILINE)
+    if close is None:
         return None, "unterminated YAML frontmatter"
 
     try:
-        data = yaml.load(text[4:close], Loader=NoAliasSafeLoader) or {}
+        data = yaml.load(text[4:4 + close.start()], Loader=NoAliasSafeLoader)
     except yaml.YAMLError as error:
         return None, f"invalid YAML: {error}"
 
+    if data is None:
+        data = {}
     if not isinstance(data, dict):
         return None, "YAML frontmatter must be a mapping"
     return data, None
-
-
-def frontmatter_end(text: str) -> int:
-    """Return the offset of a closing delimiter that occupies its own line."""
-    # Start at 3 so a delimiter on the line right after the opening (an empty
-    # frontmatter block) is still found; allow trailing whitespace on the
-    # delimiter line, as other frontmatter parsers do.
-    offset = 3
-    while (close := text.find("\n---", offset)) != -1:
-        after = close + 4
-        line_end = text.find("\n", after)
-        rest = text[after:] if line_end == -1 else text[after:line_end]
-        if not rest.strip():
-            return close
-        offset = after
-    return -1
 
 
 def validate_manifest(path: Path, available: set[str]) -> list[str]:

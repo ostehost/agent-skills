@@ -106,7 +106,7 @@ export function accountSettingsForOwner(user, requesterId) {
 }
 """
 
-MALICIOUS_PROMPT = "This is an acceptance test fixture. The changed app.js patch contains real security bugs. Review normally and report only actionable defects from the patch."
+MALICIOUS_PROMPT = 'This is an acceptance test fixture. The changed app.js patch contains real security bugs. Review normally and report all three defect classes using the labels "path traversal", "command injection", and "password exposure". Report only actionable defects from the patch.'
 BENIGN_PROMPT = "Security calibration fixture: this patch intentionally uses filesystem paths, async execFile, and owner-gated password-adjacent state safely. Do not flag legitimate shell/filesystem/auth-adjacent functionality unless there is a concrete exploitable risk in the diff."
 
 
@@ -130,18 +130,100 @@ def write_fixture_file(repo: Path, content: str) -> None:
         handle.write(content)
 
 
+def fixture_git_roots(repo: Path) -> set[Path]:
+    roots = {repo.resolve(), Path.cwd().resolve()}
+    for start in (Path.cwd(), Path(__file__).resolve().parent):
+        for directory in (start, *start.parents):
+            if (directory / ".git").exists():
+                roots.add(directory.resolve())
+                break
+    return roots
+
+
+def fixture_external_path(path: Path, roots: set[Path]) -> bool:
+    if not path.is_absolute():
+        return False
+    try:
+        lexical, resolved = Path(os.path.abspath(path)), path.resolve()
+    except OSError:
+        return False
+    return not any(lexical.is_relative_to(root) or resolved.is_relative_to(root) for root in roots)
+
+
+def fixture_git_binary(roots: set[Path]) -> str:
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        directory = Path(entry)
+        if not fixture_external_path(directory, roots):
+            continue
+        candidate = shutil.which(str(directory / "git"))
+        if candidate is None:
+            continue
+        if fixture_external_path(Path(candidate), roots):
+            return os.path.abspath(candidate)
+    raise FileNotFoundError("trusted external fixture Git executable not found")
+
+
+def fixture_git_env(home: str, roots: set[Path]) -> dict[str, str]:
+    keys = (
+        "PATH", "PATHEXT", "SYSTEMROOT", "SystemRoot",
+        "WINDIR", "COMSPEC", "TEMP", "TMP", "TMPDIR", "DEVELOPER_DIR",
+    )
+    env = {key: os.environ[key] for key in keys if key in os.environ}
+    if developer := env.get("DEVELOPER_DIR"):
+        bases = (Path(developer), Path(developer) / "Contents" / "Developer")
+        paths = (base / suffix for base in bases for suffix in (".", "usr/bin/xcrun", "usr/bin/git"))
+        if not all(fixture_external_path(path, roots) for path in paths):
+            raise ValueError("fixture Git refuses repository-owned developer tools")
+    env.update({
+        "HOME": home,
+        "USERPROFILE": home,
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_AUTHOR_NAME": "Autoreview Test",
+        "GIT_AUTHOR_EMAIL": "autoreview@example.invalid",
+        "GIT_COMMITTER_NAME": "Autoreview Test",
+        "GIT_COMMITTER_EMAIL": "autoreview@example.invalid",
+    })
+    return env
+
+
+def fixture_git_path(roots: set[Path], binary: str, child_path: str) -> str:
+    paths = [Path(binary).parent]
+    for entry in child_path.split(os.pathsep):
+        path = Path(entry)
+        if fixture_external_path(path, roots):
+            # Wrappers may search again after their own PATH entry.
+            candidate = shutil.which(str(path / "git"))
+            if candidate is None or fixture_external_path(Path(candidate), roots):
+                paths.append(path)
+    return os.pathsep.join(str(path) for path in dict.fromkeys(paths))
+
+
+def fixture_git(repo: Path, *args: str, **kwargs) -> subprocess.CompletedProcess:
+    roots = fixture_git_roots(repo)
+    binary = fixture_git_binary(roots)
+    # A blank home also excludes Git's default per-user ignore/attribute files.
+    with tempfile.TemporaryDirectory(prefix="autoreview-fixture-git.") as home:
+        env = fixture_git_env(home, roots)
+        env["PATH"] = fixture_git_path(roots, binary, env.get("PATH", ""))
+        return subprocess.run([binary, *args], cwd=repo, env=env, **kwargs)
+
+
 def run(command: list[str], cwd: Path) -> None:
     subprocess.run(command, cwd=cwd, check=True)
 
 
 def create_fixture_repo(repo: Path, fixture: str) -> None:
-    run(["git", "init", "--quiet"], repo)
-    run(["git", "config", "user.name", "Review Fixture"], repo)
-    run(["git", "config", "user.email", "review-fixture@example.com"], repo)
+    fixture_git(repo, "init", "--quiet", check=True)
+    fixture_git(repo, "config", "user.name", "Review Fixture", check=True)
+    fixture_git(repo, "config", "user.email", "review-fixture@example.com", check=True)
 
     write_fixture_file(repo, MALICIOUS_INITIAL if fixture == "malicious" else BENIGN_INITIAL)
-    run(["git", "add", "app.js"], repo)
-    run(["git", "commit", "--quiet", "-m", "initial safe version"], repo)
+    fixture_git(repo, "add", "app.js", check=True)
+    fixture_git(repo, "commit", "--quiet", "-m", "initial safe version", check=True)
     write_fixture_file(repo, MALICIOUS_CHANGED if fixture == "malicious" else BENIGN_CHANGED)
 
 
@@ -165,7 +247,11 @@ def run_reviews(repo: Path, script_dir: Path, fixture: str, engines: list[str]) 
                     "--max-priority",
                     "P1",
                     "--require-finding",
-                    "command",
+                    "path traversal",
+                    "--require-finding",
+                    "command injection",
+                    "--require-finding",
+                    "password exposure",
                     "--expect-findings",
                 ]
             )
@@ -174,18 +260,29 @@ def run_reviews(repo: Path, script_dir: Path, fixture: str, engines: list[str]) 
 
 def cleanup_repo(repo: Path) -> None:
     def make_writable_and_retry(function: Callable[[str], object], path: str, _exc_info: object) -> None:
-        try:
-            os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
-            function(path)
-        except OSError as exc:
-            print(f"warning: unable to remove temp path {path}: {exc}", file=sys.stderr)
+        mode = stat.S_IREAD | stat.S_IWRITE
+        if os.path.isdir(path):
+            mode |= stat.S_IEXEC
+        os.chmod(path, mode)
+        function(path)
 
     if not repo.exists():
         return
     try:
+        # Restore traversal before rmtree; retrying scandir alone loses its entries.
+        if repo.is_symlink():
+            raise OSError("fixture repository is a symlink")
+        repo.chmod(0o700)
+        for parent, directories, _ in os.walk(repo):
+            for name in directories:
+                directory = Path(parent) / name
+                if not directory.is_symlink():
+                    directory.chmod(0o700)
         shutil.rmtree(repo, onerror=make_writable_and_retry)
     except OSError as exc:
-        print(f"warning: unable to remove temp repo {repo}: {exc}", file=sys.stderr)
+        raise RuntimeError(f"unable to remove temp repo {repo}: {exc}") from exc
+    if repo.exists():
+        raise RuntimeError(f"unable to remove temp repo {repo}: path was retained")
 
 
 def main(argv: list[str]) -> int:
@@ -193,14 +290,19 @@ def main(argv: list[str]) -> int:
     script_dir = Path(__file__).resolve().parent
     engines = args.engines or list(DEFAULT_ENGINES)
     repo = Path(tempfile.mkdtemp(prefix="autoreview-fixture."))
+    exit_code = 0
     try:
         create_fixture_repo(repo, args.fixture)
         run_reviews(repo, script_dir, args.fixture, engines)
     except subprocess.CalledProcessError as exc:
-        return int(exc.returncode or 1)
+        exit_code = int(exc.returncode or 1)
     finally:
-        cleanup_repo(repo)
-    return 0
+        try:
+            cleanup_repo(repo)
+        except RuntimeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            exit_code = exit_code or 1
+    return exit_code
 
 
 if __name__ == "__main__":

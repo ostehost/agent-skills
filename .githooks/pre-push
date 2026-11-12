@@ -9,12 +9,21 @@
 # Python/Node tree. Before this file existed, a push ran ZERO checks and
 # still printed success.
 #
-# scripts/run-checks is the gate: it mirrors .github/workflows/validate.yml
-# step-for-step, so green here means green in CI. It is deliberately
-# fail-closed — a missing dev dependency (PyYAML) exits 2 and blocks the
-# push. Install it (`python3 -m pip install -r requirements-dev.txt`, or the
-# repo-local .venv the script header describes) rather than bypassing; a gate
-# that self-skips on missing tools is a false green.
+# scripts/run-checks is the gate: upstream's scripts/check-skills (what
+# validate.yml runs) followed by the fork-only scripts/check-fork (what
+# fork-validate.yml runs). It runs the same entrypoints as CI, not a
+# step-for-step copy of either workflow, and it does not cover validate.yml's
+# installed-source or macos-sandbox jobs.
+#
+# It is deliberately fail-closed and refuses to start (exit 2) unless:
+#   - PYTHON (default python3) is an interpreter OUTSIDE this checkout with
+#     PyYAML and Pillow installed (`<python> -m pip install -r
+#     requirements-dev.txt`); an in-repo .venv is refused, because autoreview
+#     refuses in-repo interpreters;
+#   - the temporary directory is private (on macOS, not /tmp or /var/tmp);
+#   - node, npm and node_modules exist (`npm ci --ignore-scripts`).
+# Fix the environment rather than bypassing; a gate that self-skips on
+# missing tools is a false green.
 #
 # RAN_JUST_CI can never be 1 here (no justfile), so there is nothing to
 # coordinate with. If a justfile with a `ci` recipe ever lands, add the
@@ -23,5 +32,5 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
-echo "🧪 [agent-skills] scripts/run-checks (CI mirror)…"
+echo "🧪 [agent-skills] scripts/run-checks (check-skills + check-fork)…"
 exec scripts/run-checks
