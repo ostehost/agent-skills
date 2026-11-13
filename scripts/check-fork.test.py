@@ -226,7 +226,9 @@ class CheckForkTest(unittest.TestCase):
         self.assertIn("FAILED (3): fork python suites", err)
 
     def test_missing_executable_is_a_failure(self) -> None:
-        code, commands, _, err = self.commands(ROOT, [], which=lambda name: None if name == "node" else name)
+        # node is only required where the node suite runs, so pin the POSIX branch.
+        with mock.patch.dict(HELPER["main"].__globals__, {"on_windows": lambda: False}):
+            code, commands, _, err = self.commands(ROOT, [], which=lambda name: None if name == "node" else name)
         self.assertEqual(code, 1)
         self.assertIn("required executable not found: node", err)
         self.assertNotIn("node", [command[0] for command in commands])
