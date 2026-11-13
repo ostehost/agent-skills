@@ -9632,6 +9632,19 @@ def run_selected_review(
         if target == "commit":
             target_ref = commit_sha
         evidence, prompts = prepare_selected_review(args, repo, target, target_ref, captured, evidence)
+    # The binding attests the snapshot's HEAD as reviewed_commit, but a branch
+    # bundle re-resolves HEAD. A HEAD that moved away and back (A-B-A) leaves
+    # every snapshot comparison equal, so the bundle must have been cut from it.
+    if (bound and target != "commit" and captured.commit is not None
+            and captured.commit != review_source_snapshot[0]):
+        message = (
+            f"source changed: HEAD moved while the review bundle was being created "
+            f"(bundle cut from {captured.commit}, expected {review_source_snapshot[0]}); "
+            "rerun autoreview against the updated tree"
+        )
+        if receipt is not None:
+            receipt.write_error("source_mutation", message)
+        raise SystemExit(message)
     if base_commit is not None:
         require_base_ref_unmoved(repo, base_ref_name, base_commit, receipt, captured)
     if bound:

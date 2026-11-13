@@ -1490,6 +1490,38 @@ process.stdout.write("node-verified " + envelope.artifact_digest);
             self.assertFalse(workspace["record"].exists(), "no engine may run on an A-B-A bundle")
 
     @unittest.skipIf(os.name == "nt", "the fake executables are POSIX-only")
+    def test_head_moving_away_and_back_during_bundling_is_a_source_mutation(self) -> None:
+        # PAR-1287: reviewed_commit comes from the initial snapshot, but
+        # branch_bundle re-resolves HEAD. A HEAD that moves away and back leaves
+        # every snapshot comparison equal, so the bundle's own commit must match.
+        with tempfile.TemporaryDirectory() as tempdir:
+            workspace, repo, base_sha, head_sha, argv = self.branch_workspace(Path(tempdir))
+            head_ref = git(repo, "symbolic-ref", "HEAD").strip()
+            original_bundle = self.helper["branch_bundle"]
+            seen: dict[str, object] = {}
+
+            def aba_head_bundle(repo_path, base_ref, *args, **kwargs):
+                git(repo, "update-ref", head_ref, base_sha)
+                captured = original_bundle(repo_path, base_ref, *args, **kwargs)
+                seen["commit"] = captured.commit
+                git(repo, "update-ref", head_ref, head_sha)
+                return captured
+
+            exit_code, raised, stdout, stderr = self.run_main(
+                workspace, argv, {"branch_bundle": aba_head_bundle},
+            )
+            self.assertEqual(seen["commit"], base_sha, "fixture must cut the bundle from the moved HEAD")
+            self.assertEqual(git(repo, "rev-parse", "HEAD").strip(), head_sha, "fixture must restore HEAD")
+            self.assertIsNone(exit_code, stderr)
+            self.assertIsInstance(raised, SystemExit)
+            self.assertIn("HEAD moved", str(raised.code))
+            _, payload = self.load_receipt(workspace)
+            self.assertEqual(payload["status"], "error")
+            self.assertEqual(payload["error"]["kind"], "source_mutation")
+            self.assertNotIn("scoped-clean", stdout, "no clean verdict may be printed for an unreviewed commit")
+            self.assertFalse(workspace["record"].exists(), "no engine may run on a bundle cut from another HEAD")
+
+    @unittest.skipIf(os.name == "nt", "the fake executables are POSIX-only")
     def test_base_ref_moving_during_the_review_is_a_source_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             workspace, repo, base_sha, head_sha, argv = self.branch_workspace(Path(tempdir))
